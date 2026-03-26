@@ -7,7 +7,7 @@
   <title>Augment</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Playfair+Display:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=3">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -58,21 +58,30 @@
         <!-- Sidebar Widgets -->
         <div class="sidebar-widgets">
           <div class="panel-section">
-            <h3 class="panel-title">⏱ Active Timers</h3>
+            <h3 class="panel-title">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 6px; vertical-align: text-top;"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+              Active Timers
+            </h3>
             <div id="activeTimers" class="timers-feed">
               <p class="empty-hint">No active timers</p>
             </div>
           </div>
 
           <div class="panel-section" id="calendarSection">
-            <h3 class="panel-title">📅 Calendar</h3>
+            <h3 class="panel-title">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 6px; vertical-align: text-top;"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+              Calendar
+            </h3>
             <div id="calendarWidget" class="google-widget">
               <p class="empty-hint" id="calendarPlaceholder">Connect Google</p>
             </div>
           </div>
 
           <div class="panel-section" id="gmailSection">
-            <h3 class="panel-title">📧 Gmail</h3>
+            <h3 class="panel-title">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 6px; vertical-align: text-top;"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>
+              Gmail
+            </h3>
             <div id="gmailWidget" class="google-widget">
               <p class="empty-hint" id="gmailPlaceholder">Connect Google</p>
             </div>

@@ -55,7 +55,7 @@ router.post('/chat', async (req, res) => {
         res.json({ reply, session_id, extracted: true });
     } catch (err) {
         console.error('Chat error:', err);
-        res.status(500).json({ error: 'Failed to generate response. Is Ollama running?' });
+        res.status(500).json({ error: `AI error: ${err.message}` });
     }
 });
 
@@ -106,22 +106,41 @@ router.get('/tasks', (req, res) => {
     res.json(db.getTasks());
 });
 
-router.post('/tasks', (req, res) => {
+router.post('/tasks', async (req, res) => {
     const { goal_id, title, deadline, status, priority } = req.body;
     if (!title) return res.status(400).json({ error: 'Title is required' });
     const result = db.addTask(goal_id || null, title, deadline, status, priority);
+    
+    // Optional: Send email on new task
+    try {
+        const { sendTaskUpdateEmail } = require('./gmail');
+        await sendTaskUpdateEmail(
+            `New Task Added: ${title}`, 
+            `A new task was added to your Augment AI Coach.\n\nTask: ${title}\nPriority: ${priority || 'normal'}\nDeadline: ${deadline || 'None'}`
+        );
+    } catch (err) {}
+
     res.json({ id: result.lastInsertRowid, message: 'Task added' });
 });
 
-router.patch('/tasks/:id', (req, res) => {
+router.patch('/tasks/:id', async (req, res) => {
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: 'Status is required' });
     db.updateTaskStatus(req.params.id, status);
 
-    // If completing a task, log activity
-    if (status === 'completed') {
-        const task = db.getTaskById(req.params.id);
-        if (task) db.logActivity('completed_task', task.title, 0);
+    const task = db.getTaskById(req.params.id);
+
+    // If completing a task, log activity and send email
+    if (status === 'completed' && task) {
+        db.logActivity('completed_task', task.title, 0);
+        
+        try {
+            const { sendTaskUpdateEmail } = require('./gmail');
+            await sendTaskUpdateEmail(
+                `Task Completed: ${task.title} 🎉`, 
+                `Awesome work! You just completed the following task:\n\n${task.title}\n\nKeep up the great momentum!`
+            );
+        } catch (err) {}
     }
 
     res.json({ message: 'Task updated' });

@@ -42,9 +42,52 @@ async function getUnreadSummary(maxResults = 5) {
 
         return results;
     } catch (err) {
-        console.error('[Gmail] Error fetching emails:', err.message);
+        console.error('[Gmail] Fetch error:', err.message);
         return [];
     }
 }
 
-module.exports = { getUnreadSummary };
+/**
+ * Sends an email natively from the authenticated user's account to themselves.
+ */
+async function sendTaskUpdateEmail(subject, bodyText) {
+    const client = getAuthClient(); // Changed from googleAuth.getAuthClient() to getAuthClient() as it's imported
+    if (!client) throw new Error('Google not connected');
+
+    const gmail = google.gmail({ version: 'v1', auth: client });
+    
+    // We send from 'me' to 'me'
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    const emailAddress = profile.data.emailAddress;
+
+    const messageParts = [
+        `From: Augment AI Coach <${emailAddress}>`,
+        `To: <${emailAddress}>`,
+        'Content-Type: text/plain; charset=utf-8',
+        `Subject: ${subject}`,
+        '',
+        bodyText
+    ];
+
+    const messageStr = messageParts.join('\n');
+    // Gmail API requires base64url encoded string
+    const encodedMessage = Buffer.from(messageStr)
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+
+    try {
+        await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: {
+                raw: encodedMessage
+            }
+        });
+        console.log(`[Gmail] Task update email sent to ${emailAddress}`);
+    } catch (err) {
+        console.error('[Gmail] Error sending email:', err.message);
+    }
+}
+
+module.exports = { getUnreadSummary, sendTaskUpdateEmail };

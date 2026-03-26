@@ -19,7 +19,7 @@ app.get('*', (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`\n🧠 AI Productivity Coach running at http://localhost:${PORT}\n`);
+    console.log(`\n AI Productivity Coach running at http://localhost:${PORT}\n`);
 
     // Start the proactive scheduler
     const { startScheduler } = require('./src/scheduler');

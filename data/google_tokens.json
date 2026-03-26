@@ -1,0 +1,8 @@
+{
+  "access_token": "ya29.a0Aa7MYiqDaTKKWbi8aqZCNRT88wL8kqgC08MI0EjtKbLtX_6dPw9WdQRvF1_JYgm7IGWCnhgz3aW_9lsCesD-hisJmtSUSXrK_Hhe_IFdnR78Sn7vC1z7YhOfZRJ4L9DkF6hOvyy6tka5qLX3T0RW7lasNc6ojLGkU8xY23gzqlvCt8ALr-mi_hPFgehmA3uDbCSARwcaCgYKAWMSARUSFQHGX2Mi5brgaKIL7VAq0wzbGVpOBA0206",
+  "refresh_token": "1//0gkVUn2Po4ZZ7CgYIARAAGBASNwF-L9IryyI8htw4bczeKWulijSe8DCVHIH3hQQcTmIZXn09_uaoA8_x0JbAkwbeFi4LqfTfJr0",
+  "scope": "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly",
+  "token_type": "Bearer",
+  "refresh_token_expires_in": 604799,
+  "expiry_date": 1774526829592
+}

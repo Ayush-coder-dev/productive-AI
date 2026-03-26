@@ -333,4 +333,74 @@ router.post('/push/unsubscribe', (req, res) => {
     }
 });
 
+// ── Google Integrations ─────────────────────────────────
+const googleAuth = require('./googleAuth');
+const googleCalendar = require('./googleCalendar');
+const gmail = require('./gmail');
+const { dailyBriefing } = require('./scheduler');
+
+router.get('/google/status', (req, res) => {
+    res.json({ connected: googleAuth.isConnected(), hasCredentials: googleAuth.hasCredentials() });
+});
+
+router.post('/google/save-credentials', (req, res) => {
+    const { client_id, client_secret } = req.body;
+    if (!client_id || !client_secret) return res.status(400).json({ error: 'Both client_id and client_secret are required' });
+    googleAuth.saveCredentials(client_id, client_secret);
+    res.json({ success: true });
+});
+
+router.get('/google/auth-url', (req, res) => {
+    if (!googleAuth.hasCredentials()) {
+        return res.status(400).json({ error: 'Google credentials not configured. Use the Connect Google button to set them up.' });
+    }
+    const url = googleAuth.getAuthUrl();
+    if (!url) return res.status(500).json({ error: 'Failed to generate auth URL' });
+    res.json({ url });
+});
+
+router.get('/google/callback', async (req, res) => {
+    try {
+        const { code } = req.query;
+        if (!code) return res.status(400).send('Missing authorization code');
+        await googleAuth.handleCallback(code);
+        res.send('<html><body style="background:#0B0B0F;color:#F0F0F5;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><div style="text-align:center"><h1 style="color:#2DD4A0">✓ Google Connected!</h1><p>You can close this tab and return to Augment AI.</p></div></body></html>');
+    } catch (err) {
+        res.status(500).send('OAuth error: ' + err.message);
+    }
+});
+
+router.get('/google/disconnect', (req, res) => {
+    googleAuth.disconnect();
+    res.json({ success: true });
+});
+
+router.get('/google/calendar/today', async (req, res) => {
+    try {
+        const events = await googleCalendar.getTodayEvents();
+        res.json(events);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/google/gmail/unread', async (req, res) => {
+    try {
+        const emails = await gmail.getUnreadSummary(5);
+        res.json(emails);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Test endpoint to manually trigger a daily briefing
+router.post('/briefing/trigger', async (req, res) => {
+    try {
+        await dailyBriefing();
+        res.json({ success: true, message: 'Briefing triggered' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

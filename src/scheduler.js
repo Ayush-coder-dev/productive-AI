@@ -5,7 +5,74 @@ const contextGraph = require('./contextGraph');
 const { analyzeAndStorePatterns, detectStreaks } = require('./patternAnalyzer');
 const { sendPushToAll } = require('./pushNotify');
 
+// Optional Google integrations (gracefully degrade if not connected)
+let getTodayEvents, getUnreadSummary;
+try {
+    getTodayEvents = require('./googleCalendar').getTodayEvents;
+    getUnreadSummary = require('./gmail').getUnreadSummary;
+} catch { getTodayEvents = async () => []; getUnreadSummary = async () => []; }
+
 let isRunning = false;
+
+/**
+ * Generate a rich Daily Morning Briefing and send it as a push notification.
+ */
+async function dailyBriefing() {
+    console.log('[Scheduler] Generating Daily Morning Briefing...');
+    try {
+        const pendingTasks = db.getPendingTasks();
+        const activeGoals = db.getActiveGoals();
+        const upcomingEvents = db.getUpcomingEvents();
+        const allTasks = db.getTasks();
+
+        // Google integrations (safe to fail)
+        let calendarEvents = [];
+        let unreadEmails = [];
+        try { calendarEvents = await getTodayEvents(); } catch {}
+        try { unreadEmails = await getUnreadSummary(5); } catch {}
+
+        // Build context for AI to summarize
+        let briefingContext = `Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.\n`;
+        briefingContext += `\n## Pending Tasks (${pendingTasks.length}):\n`;
+        pendingTasks.slice(0, 8).forEach(t => { briefingContext += `- ${t.title}${t.deadline ? ' (due: ' + t.deadline + ')' : ''}\n`; });
+
+        briefingContext += `\n## Active Objectives (${activeGoals.length}):\n`;
+        activeGoals.forEach(g => {
+            const tc = allTasks.filter(t => t.goal_id === g.id);
+            const done = tc.filter(t => t.status === 'completed').length;
+            briefingContext += `- ${g.title} — ${done}/${tc.length} steps done\n`;
+        });
+
+        if (upcomingEvents.length > 0) {
+            briefingContext += `\n## Upcoming Events:\n`;
+            upcomingEvents.slice(0, 5).forEach(e => { briefingContext += `- ${e.title} on ${e.date}\n`; });
+        }
+
+        if (calendarEvents.length > 0) {
+            briefingContext += `\n## Today's Calendar:\n`;
+            calendarEvents.forEach(e => {
+                const start = e.startTime ? new Date(e.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'All day';
+                briefingContext += `- ${start}: ${e.title}\n`;
+            });
+        }
+
+        if (unreadEmails.length > 0) {
+            briefingContext += `\n## Unread Emails (${unreadEmails.length}):\n`;
+            unreadEmails.forEach(e => { briefingContext += `- From ${e.from}: "${e.subject}"\n`; });
+        }
+
+        const system = `You are a premium AI productivity coach delivering a morning briefing. Summarize the user's day ahead in 3-5 crisp, actionable bullet points. Be specific: mention task names, event times, and email senders. Close with a single motivating sentence. Do NOT use clichés.`;
+        const briefing = await llm.generate(briefingContext, system, { temperature: 0.7, num_predict: 300 });
+
+        if (briefing && briefing.trim()) {
+            db.addProactiveMessage('briefing', briefing.trim(), 'Daily Morning Briefing');
+            sendPushToAll('☀️ Your Morning Briefing', briefing.trim().substring(0, 200), 'briefing').catch(() => {});
+            console.log('[Scheduler] Morning briefing sent.');
+        }
+    } catch (err) {
+        console.error('[Scheduler] Briefing error:', err.message);
+    }
+}
 
 /**
  * The cognitive loop: Observe → Think → Decide → Act → Reflect
@@ -184,7 +251,7 @@ function reloadCrons() {
 }
 
 /**
- * Start the scheduler. Runs cognitive loop every hour and sets up reminders.
+ * Start the scheduler. Runs cognitive loop every hour, briefing every morning, and sets up reminders.
  */
 function startScheduler() {
     console.log('[Scheduler] Starting proactive scheduler and reminder engine...');
@@ -192,6 +259,11 @@ function startScheduler() {
     // Run cognitive loop every hour
     cron.schedule('0 * * * *', () => {
         cognitiveLoop();
+    });
+
+    // Daily Morning Briefing at 8:00 AM
+    cron.schedule('0 8 * * *', () => {
+        dailyBriefing();
     });
 
     // Also run cognitive loop once on startup after a short delay
@@ -220,4 +292,4 @@ function startScheduler() {
     });
 }
 
-module.exports = { startScheduler, cognitiveLoop, reloadCrons };
+module.exports = { startScheduler, cognitiveLoop, reloadCrons, dailyBriefing };

@@ -305,11 +305,56 @@ function showPulse(msg) {
   el.classList.remove('hidden');
   el.classList.remove('expanded');
   
+  // Do not mark as read here automatically if we want them to use the dropdown, but it's OK to do so if they saw the pulse.
   api(`/proactive/${msg.id}/read`, { method: 'PATCH' }).catch(()=>{});
 
   setTimeout(() => { 
     if (!el.classList.contains('expanded')) el.classList.add('hidden'); 
   }, 15000);
+}
+
+// ── Notification Dropdown ───────────────────────────
+document.getElementById('notifBell').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const dropdown = document.getElementById('notifDropdown');
+  if (!dropdown) return;
+  dropdown.classList.toggle('hidden');
+  if (!dropdown.classList.contains('hidden')) {
+    document.getElementById('bellDot').classList.add('hidden');
+    renderNotifDropdown();
+  }
+});
+window.addEventListener('click', (e) => {
+  if (!e.target.closest('.notif-wrapper')) {
+    const d = document.getElementById('notifDropdown');
+    if (d && !d.classList.contains('hidden')) d.classList.add('hidden');
+  }
+});
+
+async function renderNotifDropdown() {
+  try {
+    const list = document.getElementById('notifList');
+    if (!list) return;
+    list.innerHTML = '<p class="empty-hint" style="padding:12px">Loading...</p>';
+    const msgs = await api('/proactive');
+    if (msgs.length > 0) {
+      list.innerHTML = msgs.slice(0, 15).map(m => {
+        const color = m.type==='reminder'?'--red':m.type==='insight'?'--teal':m.type==='challenge'?'--amber':m.type==='briefing'?'--amber':'--purple';
+        const extraClass = m.type === 'briefing' ? ' briefing-card' : '';
+        return `
+        <div class="dropdown-item${extraClass}">
+          <div class="dropdown-item-type" style="color:var(${color})">${m.type === 'briefing' ? '☀️ DAILY BRIEFING' : m.type}</div>
+          <div class="dropdown-item-text">${esc(m.content)}</div>
+          <div class="dropdown-item-time" style="font-size:10px;color:var(--text-4);margin-top:4px;">${new Date(m.timestamp).toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}</div>
+        </div>`;
+      }).join('');
+      // mark any unread proactively
+      const unread = await api('/proactive/unread');
+      unread.forEach(u => api(`/proactive/${u.id}/read`, {method:'PATCH'}).catch(()=>{}));
+    } else {
+      list.innerHTML = '<p class="empty-hint" style="padding:12px">No notifications</p>';
+    }
+  } catch(e) { console.error(e) }
 }
 
 // ── Chip Select Logic ───────────────────────────────
@@ -402,6 +447,16 @@ document.querySelectorAll('#taskFilter .seg').forEach(b => {
   });
 });
 
+let objectiveViewMode = 'short';
+document.querySelectorAll('#objViewToggle .seg').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#objViewToggle .seg').forEach(s => s.classList.remove('active'));
+    b.classList.add('active');
+    objectiveViewMode = b.dataset.view;
+    loadTasksAndGoals();
+  });
+});
+
 async function populateGoalDropdown() {
   const goals = await api('/goals');
   const sel = document.getElementById('taskGoalId');
@@ -431,7 +486,7 @@ async function loadTasksAndGoals() {
           <div class="obj-card-desc">${tc.length ? `${done}/${tc.length} tasks complete` : (g.deadline ? relDate(g.deadline) : 'No roadmap yet')}</div>
           <div class="obj-bar-track"><div class="obj-bar-fill" style="width:${pct}%"></div></div>
         </div>
-        <div class="obj-roadmap hidden" id="roadmap-${g.id}">
+        <div class="obj-roadmap ${objectiveViewMode === 'long' ? '' : 'hidden'}" id="roadmap-${g.id}">
           ${tc.map((t, index) => `<div class="roadmap-step ${t.status==='completed'?'done':''}" onclick="toggleTask(${t.id},'${t.status}')">
             <div class="step-node"></div>
             <div class="step-content">
@@ -764,5 +819,97 @@ async function init() {
 
   // Setup push notifications
   setupPushNotifications();
+
+  // Load Google widgets
+  loadGoogleWidgets();
 }
+
+// ── Google Integration Widgets ──────────────────────
+async function loadGoogleWidgets() {
+  try {
+    const status = await api('/google/status');
+    const btn = document.getElementById('googleConnectBtn');
+    const btnText = document.getElementById('googleConnectText');
+
+    if (status.connected) {
+      btn.classList.add('connected');
+      btnText.textContent = '✓ Google Connected';
+      btn.onclick = async () => {
+        if (confirm('Disconnect Google account?')) {
+          await api('/google/disconnect');
+          location.reload();
+        }
+      };
+
+      // Load Calendar
+      try {
+        const events = await api('/google/calendar/today');
+        const widget = document.getElementById('calendarWidget');
+        if (events.length > 0) {
+          widget.innerHTML = events.map(e => {
+            const time = e.startTime ? new Date(e.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'All day';
+            return `<div class="g-event-item">
+              <span class="g-event-time">${time}</span>
+              <span class="g-event-title">${esc(e.title)}</span>
+            </div>`;
+          }).join('');
+        } else {
+          widget.innerHTML = '<p class="empty-hint">No events today</p>';
+        }
+      } catch {}
+
+      // Load Gmail
+      try {
+        const emails = await api('/google/gmail/unread');
+        const widget = document.getElementById('gmailWidget');
+        if (emails.length > 0) {
+          widget.innerHTML = emails.map(e => `<div class="g-email-item">
+            <div>
+              <div class="g-email-from">${esc(e.from)}</div>
+              <div class="g-email-subject">${esc(e.subject)}</div>
+            </div>
+          </div>`).join('');
+        } else {
+          widget.innerHTML = '<p class="empty-hint">Inbox zero! 🎉</p>';
+        }
+      } catch {}
+
+    } else if (status.hasCredentials) {
+      // Credentials saved but not yet authorized
+      btnText.textContent = 'Authorize Google';
+      btn.onclick = async () => {
+        try {
+          const data = await api('/google/auth-url');
+          window.open(data.url, '_blank');
+        } catch (err) {
+          notify('Error: ' + err.message);
+        }
+      };
+    } else {
+      // No credentials at all - prompt user to enter them
+      btnText.textContent = 'Connect Google';
+      btn.onclick = () => {
+        const clientId = prompt('Enter your Google OAuth Client ID:\n\n(Get it from Google Cloud Console → Credentials)');
+        if (!clientId) return;
+        const clientSecret = prompt('Enter your Google OAuth Client Secret:');
+        if (!clientSecret) return;
+
+        api('/google/save-credentials', {
+          method: 'POST',
+          body: { client_id: clientId.trim(), client_secret: clientSecret.trim() }
+        }).then(() => {
+          notify('✓ Credentials saved! Now authorizing...');
+          return api('/google/auth-url');
+        }).then(data => {
+          window.open(data.url, '_blank');
+        }).catch(err => {
+          notify('Error: ' + err.message);
+        });
+      };
+    }
+  } catch (err) {
+    console.error('[Google] Widget load error:', err);
+  }
+}
+
 init();

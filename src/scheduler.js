@@ -4,15 +4,23 @@ const llm = require('./llm');
 const contextGraph = require('./contextGraph');
 const { analyzeAndStorePatterns, detectStreaks } = require('./patternAnalyzer');
 const { sendPushToAll } = require('./pushNotify');
+const { sendTaskUpdateEmail } = require('./gmail');
 
 // Optional Google integrations (gracefully degrade if not connected)
-let getTodayEvents, getUnreadSummary;
+let getTodayEvents;
 try {
     getTodayEvents = require('./googleCalendar').getTodayEvents;
-    getUnreadSummary = require('./gmail').getUnreadSummary;
-} catch { getTodayEvents = async () => []; getUnreadSummary = async () => []; }
+} catch { getTodayEvents = async () => []; }
 
 let isRunning = false;
+
+async function sendNotificationEmail(subject, message) {
+    try {
+        await sendTaskUpdateEmail(subject, message);
+    } catch (err) {
+        console.warn('[Email] Notification email skipped:', err.message);
+    }
+}
 
 /**
  * Generate a rich Daily Morning Briefing and send it as a push notification.
@@ -27,9 +35,7 @@ async function dailyBriefing() {
 
         // Google integrations (safe to fail)
         let calendarEvents = [];
-        let unreadEmails = [];
         try { calendarEvents = await getTodayEvents(); } catch {}
-        try { unreadEmails = await getUnreadSummary(5); } catch {}
 
         // Build context for AI to summarize
         let briefingContext = `Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.\n`;
@@ -56,17 +62,13 @@ async function dailyBriefing() {
             });
         }
 
-        if (unreadEmails.length > 0) {
-            briefingContext += `\n## Unread Emails (${unreadEmails.length}):\n`;
-            unreadEmails.forEach(e => { briefingContext += `- From ${e.from}: "${e.subject}"\n`; });
-        }
-
-        const system = `You are a premium AI productivity coach delivering a morning briefing. Summarize the user's day ahead in 3-5 crisp, actionable bullet points. Be specific: mention task names, event times, and email senders. Close with a single motivating sentence. Do NOT use clichés.`;
+        const system = `You are a premium AI productivity coach delivering a morning briefing. Summarize the user's day ahead in 3-5 crisp, actionable bullet points. Be specific: mention task names and event times. Close with a single motivating sentence. Do NOT use clichés.`;
         const briefing = await llm.generate(briefingContext, system, { temperature: 0.7, num_predict: 300 });
 
         if (briefing && briefing.trim()) {
             db.addProactiveMessage('briefing', briefing.trim(), 'Daily Morning Briefing');
             sendPushToAll('☀️ Your Morning Briefing', briefing.trim().substring(0, 200), 'briefing').catch(() => {});
+            sendNotificationEmail('Augment AI - Morning Briefing', briefing.trim()).catch(() => {});
             console.log('[Scheduler] Morning briefing sent.');
         }
     } catch (err) {
@@ -211,6 +213,10 @@ async function cognitiveLoop() {
                 message.trim(),
                 topTrigger.type
             ).catch(err => console.warn('[Push] Error:', err.message));
+            sendNotificationEmail(
+                'Augment AI - ' + topTrigger.type.charAt(0).toUpperCase() + topTrigger.type.slice(1),
+                message.trim()
+            ).catch(() => {});
         }
 
         // ── REFLECT ──────────────────────────────────────
@@ -239,7 +245,8 @@ function reloadCrons() {
             activeCrons[r.id] = cron.schedule(r.time_rule, () => {
                 const msg = `It's time for to focus on: ${r.title}`;
                 db.addProactiveMessage('reminder', msg, 'Scheduled cron reminder');
-                sendPushToAll('Augment AI • Reminder', msg, 'reminder').catch(()=>{});
+                sendPushToAll('Augment AI - Reminder', msg, 'reminder').catch(()=>{});
+                sendNotificationEmail('Augment AI - Reminder', msg).catch(() => {});
                 
                 if (!r.is_recurring) {
                     db.deactivateReminder(r.id);
@@ -284,7 +291,8 @@ function startScheduler() {
                 if (triggerTime && now >= triggerTime) {
                     const msg = `Reminder: ${r.title}`;
                     db.addProactiveMessage('reminder', msg, 'Scheduled time reminder');
-                    sendPushToAll('Augment AI • Reminder', msg, 'reminder').catch(()=>{});
+                    sendPushToAll('Augment AI - Reminder', msg, 'reminder').catch(()=>{});
+                    sendNotificationEmail('Augment AI - Reminder', msg).catch(() => {});
                     db.deactivateReminder(r.id);
                 }
             }
@@ -293,3 +301,4 @@ function startScheduler() {
 }
 
 module.exports = { startScheduler, cognitiveLoop, reloadCrons, dailyBriefing };
+

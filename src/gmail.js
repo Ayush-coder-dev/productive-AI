@@ -55,10 +55,19 @@ async function sendTaskUpdateEmail(subject, bodyText) {
     if (!client) throw new Error('Google not connected');
 
     const gmail = google.gmail({ version: 'v1', auth: client });
-    
-    // We send from 'me' to 'me'
-    const profile = await gmail.users.getProfile({ userId: 'me' });
-    const emailAddress = profile.data.emailAddress;
+
+    // Prefer explicit notification target to avoid requiring extra read scopes.
+    let emailAddress = process.env.NOTIFICATION_EMAIL || process.env.GMAIL_ADDRESS || '';
+    if (!emailAddress) {
+        try {
+            const profile = await gmail.users.getProfile({ userId: 'me' });
+            emailAddress = profile.data.emailAddress || '';
+        } catch (err) {
+            throw new Error(
+                'Unable to resolve recipient email. Set NOTIFICATION_EMAIL in .env or grant gmail.readonly and reconnect Google.'
+            );
+        }
+    }
 
     const messageParts = [
         `From: Augment AI Coach <${emailAddress}>`,
@@ -87,6 +96,7 @@ async function sendTaskUpdateEmail(subject, bodyText) {
         console.log(`[Gmail] Task update email sent to ${emailAddress}`);
     } catch (err) {
         console.error('[Gmail] Error sending email:', err.message);
+        throw err;
     }
 }
 

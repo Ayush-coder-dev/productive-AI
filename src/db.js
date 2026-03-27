@@ -131,6 +131,7 @@ const getGoals = db.prepare(`SELECT * FROM goals ORDER BY created_at DESC`);
 const getGoalById = db.prepare(`SELECT * FROM goals WHERE id = ?`);
 const updateGoalProgress = db.prepare(`UPDATE goals SET progress = ? WHERE id = ?`);
 const updateGoalStatus = db.prepare(`UPDATE goals SET status = ? WHERE id = ?`);
+const deleteGoal = db.prepare(`DELETE FROM goals WHERE id = ?`);
 const getActiveGoals = db.prepare(`SELECT * FROM goals WHERE status = 'active' ORDER BY deadline ASC`);
 
 // ── Tasks ───────────────────────────────────────────────
@@ -202,6 +203,7 @@ module.exports = {
   getGoalById: (id) => getGoalById.get(id),
   updateGoalProgress: (id, progress) => updateGoalProgress.run(progress, id),
   updateGoalStatus: (id, status) => updateGoalStatus.run(status, id),
+  deleteGoal: (id) => deleteGoal.run(id),
   getActiveGoals: () => getActiveGoals.all(),
 
   // Tasks

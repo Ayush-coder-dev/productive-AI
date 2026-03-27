@@ -101,6 +101,11 @@ router.patch('/goals/:id', (req, res) => {
     res.json({ message: 'Goal updated' });
 });
 
+router.delete('/goals/:id', (req, res) => {
+    db.deleteGoal(req.params.id);
+    res.json({ message: 'Goal discarded' });
+});
+
 // ── Tasks ───────────────────────────────────────────────
 router.get('/tasks', (req, res) => {
     res.json(db.getTasks());
@@ -111,15 +116,6 @@ router.post('/tasks', async (req, res) => {
     if (!title) return res.status(400).json({ error: 'Title is required' });
     const result = db.addTask(goal_id || null, title, deadline, status, priority);
     
-    // Optional: Send email on new task
-    try {
-        const { sendTaskUpdateEmail } = require('./gmail');
-        await sendTaskUpdateEmail(
-            `New Task Added: ${title}`, 
-            `A new task was added to your Augment AI Coach.\n\nTask: ${title}\nPriority: ${priority || 'normal'}\nDeadline: ${deadline || 'None'}`
-        );
-    } catch (err) {}
-
     res.json({ id: result.lastInsertRowid, message: 'Task added' });
 });
 
@@ -130,17 +126,9 @@ router.patch('/tasks/:id', async (req, res) => {
 
     const task = db.getTaskById(req.params.id);
 
-    // If completing a task, log activity and send email
+    // If completing a task, log activity
     if (status === 'completed' && task) {
         db.logActivity('completed_task', task.title, 0);
-        
-        try {
-            const { sendTaskUpdateEmail } = require('./gmail');
-            await sendTaskUpdateEmail(
-                `Task Completed: ${task.title} 🎉`, 
-                `Awesome work! You just completed the following task:\n\n${task.title}\n\nKeep up the great momentum!`
-            );
-        } catch (err) {}
     }
 
     res.json({ message: 'Task updated' });
@@ -355,7 +343,6 @@ router.post('/push/unsubscribe', (req, res) => {
 // ── Google Integrations ─────────────────────────────────
 const googleAuth = require('./googleAuth');
 const googleCalendar = require('./googleCalendar');
-const gmail = require('./gmail');
 const { dailyBriefing } = require('./scheduler');
 
 router.get('/google/status', (req, res) => {
@@ -398,15 +385,6 @@ router.get('/google/calendar/today', async (req, res) => {
     try {
         const events = await googleCalendar.getTodayEvents();
         res.json(events);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-router.get('/google/gmail/unread', async (req, res) => {
-    try {
-        const emails = await gmail.getUnreadSummary(5);
-        res.json(emails);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

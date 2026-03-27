@@ -1,29 +1,24 @@
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MODEL = 'gemini-2.5-flash';
+const MODEL = process.env.OLLAMA_MODEL || 'llama3:8b';
+const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
 
 /**
- * Call Gemini API generate endpoint.
+ * Call Ollama local chat endpoint.
  */
 async function generate(prompt, system = '', options = {}) {
-    if (GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY') {
-        console.warn('⚠️ Please set your GEMINI_API_KEY at the top of src/llm.js!');
-    }
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const url = `${OLLAMA_HOST}/api/chat`;
+    const messages = [];
+    if (system) messages.push({ role: 'system', content: system });
+    messages.push({ role: 'user', content: prompt });
 
     const body = {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-            temperature: options.temperature || 0.7,
-            maxOutputTokens: options.num_predict || 512,
-        }
+        model: MODEL,
+        messages,
+        stream: false,
+        options: {
+            temperature: options.temperature ?? 0.7,
+            num_predict: options.num_predict ?? 512,
+        },
     };
-
-    if (system) {
-        body.systemInstruction = {
-            parts: [{ text: system }]
-        };
-    }
 
     const res = await fetch(url, {
         method: 'POST',
@@ -33,11 +28,11 @@ async function generate(prompt, system = '', options = {}) {
 
     if (!res.ok) {
         const text = await res.text();
-        throw new Error(`Gemini API error ${res.status}: ${text}`);
+        throw new Error(`Ollama error ${res.status}: ${text}`);
     }
 
     const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    return data.message?.content || '';
 }
 
 /**
@@ -59,12 +54,16 @@ Return ONLY a valid JSON object with these optional fields:
   "tasks": [{"title": "...", "deadline": "YYYY-MM-DD or null", "priority": "high|medium|low", "goal_title": "related goal or null"}],
   "events": [{"title": "...", "date": "YYYY-MM-DD", "importance": "high|medium|low"}],
   "activities": [{"action": "...", "task": "...", "duration_min": number}],
-  "reminders": [{"title": "...", "time_rule": "cron expression (e.g. '0 10 * * *') or specific date/time", "is_recurring": true|false}]
+  "reminders": [{"title": "...", "time_rule": "cron expression (e.g. '0 10 * * *') or specific date/time", "is_recurring": true|false}],
+  "remove_reminders": {"all": true|false, "titles": ["..."], "match_mode": "exact|contains"}
 }
 Rules:
 - If the user asks for a persistent objective, provide a highly detailed, comprehensive quest-like roadmap in "roadmap_steps". Do NOT give 3 steps. You MUST provide at least 8 to 12 distinct, actionable steps that walk the user completely from start to finish.
 - If the user asks for a daily/weekly reminder or a cron job, add it to "reminders" with a standard 5-part cron expression for "time_rule".
 - If the user specifies a relative or exact one-time reminder (e.g., "in 15 minutes" or "at 3 PM"), strictly calculate the exact future ISO timestamp based on the CURRENT TIME and provide that timestamp for "time_rule" with "is_recurring" set to false.
+- If the user asks to remove/delete/cancel reminders or cron jobs, use "remove_reminders".
+  - Use {"all": true} when they mean all reminders.
+  - Use {"titles":[...], "match_mode":"contains"} when they mention reminder names loosely.
 - CURRENT DATE: ${new Date().toISOString().split('T')[0]}
 - CURRENT EXACT TIME (ISO): ${new Date().toISOString()}
 Only include fields that are present in the message. If nothing can be extracted, return {}.`;

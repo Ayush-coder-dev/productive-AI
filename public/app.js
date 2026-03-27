@@ -12,6 +12,9 @@ let timerSeconds = 25 * 60;
 let timerRunning = false;
 const TIMER_TOTAL = 25 * 60;
 const TIMER_CIRC = 2 * Math.PI * 52;
+let calendarView = 'day';
+let calendarEventsCache = [];
+let calendarIsDemo = false;
 
 // ── API helper ──────────────────────────────────────
 async function api(path, opts = {}) {
@@ -28,6 +31,40 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 function csvEsc(s) { return s ? `"${s.replace(/"/g,'""')}"` : ''; }
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r.toISOString().split('T')[0]; }
 function relDate(d) { if (!d) return ''; const diff = Math.ceil((new Date(d) - new Date()) / 86400000); if (diff < 0) return 'OVERDUE'; if (diff === 0) return 'DUE TODAY'; if (diff === 1) return 'DUE TOMORROW'; return `DUE IN ${diff} DAYS`; }
+function formatCronHuman(cronExpr) {
+  const parts = String(cronExpr || '').trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+
+  const [min, hour, dom, month, dow] = parts;
+  const dowNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const isDaily = dom === '*' && month === '*' && dow === '*';
+  const isWeekly = dom === '*' && month === '*' && /^[0-6]$/.test(dow);
+  const isHourly = min !== '*' && hour === '*' && dom === '*' && month === '*' && dow === '*';
+  const isMinuteStep = /^\*\/\d+$/.test(min) && hour === '*' && dom === '*' && month === '*' && dow === '*';
+  const isDailyAtTime = /^\d+$/.test(min) && /^\d+$/.test(hour) && isDaily;
+
+  if (isMinuteStep) {
+    const every = min.split('/')[1];
+    return `Every ${every} minutes`;
+  }
+
+  if (isHourly) {
+    return `Every hour at :${String(Number(min)).padStart(2, '0')}`;
+  }
+
+  if (isDailyAtTime || isWeekly) {
+    const h = Number(hour);
+    const m = Number(min);
+    if (Number.isNaN(h) || Number.isNaN(m)) return null;
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (isWeekly) return `Every ${dowNames[Number(dow)]} at ${time}`;
+    return `Every day at ${time}`;
+  }
+
+  return null;
+}
 
 // ── Navigation ──────────────────────────────────────
 document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
@@ -38,13 +75,26 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === `tab-${tab}`));
 
   // Update topbar context
-  const labels = { home: 'PRODUCTIVITY COACHING', strategy: 'STRATEGIC EXECUTION', velocity: 'THE PULSE', rituals: 'SUBCONSCIOUS ARCHITECTURE' };
+  const labels = { home: 'PRODUCTIVITY COACHING', strategy: 'STRATEGIC EXECUTION', velocity: 'THE PULSE', rituals: 'SUBCONSCIOUS ARCHITECTURE', calendar: 'SCHEDULE INTELLIGENCE' };
   document.getElementById('topbarContext').textContent = labels[tab] || '';
 
   if (tab === 'strategy') loadTasksAndGoals();
   if (tab === 'velocity') loadAnalytics();
   if (tab === 'rituals') loadHabits();
+  if (tab === 'calendar') {
+    setCalendarDateBadge();
+    setCalendarView(calendarView);
+    loadGoogleWidgets();
+  }
 }
+
+document.querySelectorAll('#calendarViewToggle .seg').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#calendarViewToggle .seg').forEach(s => s.classList.remove('active'));
+    b.classList.add('active');
+    setCalendarView(b.dataset.view);
+  });
+});
 
 // ── Notification ────────────────────────────────────
 let notifTimer = null;
@@ -266,6 +316,9 @@ window.renderTimers = () => {
     
     const html = window._activeTimersData.map(r => {
         let displayTime = r.time_rule;
+        let meta = 'Recurring reminder';
+        let state = 'cron';
+        let stateLabel = 'CRON';
         const targetMs = new Date(r.time_rule).getTime();
         let isCron = r.is_recurring || isNaN(targetMs);
         
@@ -277,20 +330,33 @@ window.renderTimers = () => {
                 const mins = Math.floor((totalSec%3600)/60);
                 const secs = totalSec%60;
                 displayTime = `<span class="tm-urgent">IN ${hrs?hrs+'H ':''}${mins}M ${secs}S</span>`;
+                state = diff <= 15 * 60 * 1000 ? 'soon' : 'scheduled';
+                stateLabel = state === 'soon' ? 'SOON' : 'UPCOMING';
+                meta = `Triggers at ${new Date(targetMs).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })}`;
             } else {
                 displayTime = '<span class="tm-urgent">TRIGGERING NOW</span>';
+                state = 'live';
+                stateLabel = 'LIVE';
+                meta = 'Dispatching reminder now';
             }
         } else {
-            // It's a cron
-            displayTime = `<span class="tm-cron">CRON: ${r.time_rule}</span>`;
+            const friendlyCron = formatCronHuman(r.time_rule);
+            displayTime = friendlyCron
+                ? `<span class="tm-cron">${friendlyCron}</span>`
+                : `<span class="tm-cron">Recurring schedule</span>`;
+            meta = friendlyCron ? `Rule: ${r.time_rule}` : `Cron rule: ${r.time_rule}`;
         }
         
         return `
-        <div class="timer-item">
+        <div class="timer-item timer-${state}">
             <div class="timer-pulse"></div>
             <div class="timer-details">
-                <div class="timer-title">${esc(r.title)}</div>
+                <div class="timer-headline">
+                    <div class="timer-title">${esc(r.title)}</div>
+                    <span class="timer-badge">${stateLabel}</span>
+                </div>
                 <div class="timer-countdown">${displayTime}</div>
+                <div class="timer-meta">${meta}</div>
             </div>
         </div>`;
     }).join('');
@@ -495,6 +561,7 @@ async function loadTasksAndGoals() {
             </div>
           </div>`).join('')}
           <button class="mark-obj-btn" onclick="toggleGoal(${g.id},'${g.status}')">${g.status === 'completed' ? 'Reopen Objective' : 'Claim Final Reward (Complete)'}</button>
+          <button class="discard-obj-btn" onclick="discardGoal(${g.id}, event)">Discard Objective</button>
         </div>
       </div>`;
     }).join('');
@@ -532,6 +599,20 @@ window.toggleGoal = async (id, s) => {
   loadTasksAndGoals(); loadSidebarStats();
 };
 
+window.discardGoal = async (id, e) => {
+  if (e) e.stopPropagation();
+  if (!confirm('Discard this objective? Linked tasks will remain but be unlinked from this objective.')) return;
+  await api(`/goals/${id}`, { method: 'DELETE' });
+  const card = document.getElementById(`obj-card-${id}`);
+  if (card) card.remove();
+  const oc = document.getElementById('objectiveCards');
+  if (oc && !oc.querySelector('.obj-card')) {
+    oc.innerHTML = '<p class="obj-empty">No objectives yet. Click "+ New Initiative" to create one.</p>';
+  }
+  notify('Objective discarded');
+  loadTasksAndGoals();
+  loadSidebarStats();
+};
 window.toggleTask = async (id, s) => {
   const ns = s === 'completed' ? 'pending' : 'completed';
   await api(`/tasks/${id}`, { method: 'PATCH', body: { status: ns } });
@@ -617,13 +698,13 @@ async function loadAnalytics(view = 'daily') {
 
   // Pulse score
   animateScore(score.score);
-  const taskPct = Math.round((score.breakdown.tasks / 30) * 100);
+  const consistencyPct = Math.max(0, Math.min(100, Math.round(monthly.consistencyScore || 0)));
   const focusPct = Math.round((score.breakdown.focus / 25) * 100);
   const timePct = Math.round((score.breakdown.time / 25) * 100);
-  document.getElementById('bfTasks').style.width = taskPct + '%';
+  document.getElementById('bfTasks').style.width = consistencyPct + '%';
   document.getElementById('bfFocus').style.width = focusPct + '%';
   document.getElementById('bfTime').style.width = timePct + '%';
-  document.getElementById('pctTasks').textContent = taskPct + '%';
+  document.getElementById('pctTasks').textContent = consistencyPct + '%';
   document.getElementById('pctFocus').textContent = focusPct + '%';
   document.getElementById('pctTime').textContent = timePct + '%';
 
@@ -645,15 +726,34 @@ async function loadAnalytics(view = 'daily') {
     document.getElementById('kpiBlocked').textContent = tasks.filter(t => t.deadline && new Date(t.deadline) < new Date() && t.status === 'pending').length;
   }
 
-  // Velocity Trend chart (weekly or timeline)
-  const trendLabels = weekly.dailyBreakdown.map(d => new Date(d.date).toLocaleDateString('en', { weekday: 'short' }).toUpperCase());
-  const trendData = weekly.dailyBreakdown.map(d => d.productiveMinutes);
-  renderChart('velocityChart', 'line', trendLabels, trendData, '#7C5CFC');
+  // Charts update with the selected view.
+  if (view === 'daily') {
+    const hourLabels = Array.from({ length: 24 }, (_, i) => `${i}:00`);
+    const hourData = Array.from({ length: 24 }, (_, i) => daily.hourlyBreakdown[i] || 0);
+    const daytimeLabels = hourLabels.filter((_, i) => i >= 6 && i <= 22);
+    const daytimeData = hourData.filter((_, i) => i >= 6 && i <= 22);
+    renderChart('velocityChart', 'line', daytimeLabels, daytimeData, '#7C5CFC');
+    renderChart('deepStateChart', 'bar', daytimeLabels, daytimeData, '#2DD4A0');
+  } else if (view === 'weekly') {
+    const trendLabels = weekly.dailyBreakdown.map(d => new Date(d.date).toLocaleDateString('en', { weekday: 'short' }).toUpperCase());
+    const trendData = weekly.dailyBreakdown.map(d => d.productiveMinutes);
+    renderChart('velocityChart', 'line', trendLabels, trendData, '#7C5CFC');
+    renderChart('deepStateChart', 'bar', trendLabels, trendData, '#2DD4A0');
+  } else {
+    const monthLabels = monthly.dailyBreakdown.map(d => String(new Date(d.date).getDate()));
+    const monthData = monthly.dailyBreakdown.map(d => d.minutes);
+    renderChart('velocityChart', 'line', monthLabels, monthData, '#7C5CFC');
 
-  // Deep State ratio (hourly)
-  const hourLabels = Array.from({ length: 24 }, (_, i) => `${i}:00`);
-  const hourData = Array.from({ length: 24 }, (_, i) => daily.hourlyBreakdown[i] || 0);
-  renderChart('deepStateChart', 'bar', hourLabels.filter((_, i) => i >= 6 && i <= 22), hourData.filter((_, i) => i >= 6 && i <= 22), '#2DD4A0');
+    const weeklyBuckets = [0, 0, 0, 0, 0, 0];
+    monthly.dailyBreakdown.forEach(d => {
+      const day = new Date(d.date).getDate();
+      const idx = Math.min(Math.floor((day - 1) / 7), 5);
+      weeklyBuckets[idx] += d.minutes || 0;
+    });
+    const weekLabels = weeklyBuckets.map((_, i) => `W${i + 1}`).filter((_, i) => weeklyBuckets[i] > 0 || i < 4);
+    const weekData = weeklyBuckets.filter((v, i) => v > 0 || i < 4);
+    renderChart('deepStateChart', 'bar', weekLabels, weekData, '#2DD4A0');
+  }
 }
 
 function animateScore(target) {
@@ -747,8 +847,8 @@ async function loadSidebarStats() {
 
 // ── Keyboard Shortcuts ──────────────────────────────
 document.addEventListener('keydown', e => {
-  const tabs = ['home', 'strategy', 'velocity', 'rituals'];
-  if (e.ctrlKey && e.key >= '1' && e.key <= '4') { e.preventDefault(); switchTab(tabs[+e.key - 1]); }
+  const tabs = ['home', 'strategy', 'velocity', 'rituals', 'calendar'];
+  if (e.ctrlKey && e.key >= '1' && e.key <= '5') { e.preventDefault(); switchTab(tabs[+e.key - 1]); }
   if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); switchTab('home'); chatInput.focus(); }
   if (e.ctrlKey && e.key === 't') { e.preventDefault(); switchTab('strategy'); timerRunning ? pauseTimer() : startTimer(); }
 });
@@ -820,8 +920,231 @@ async function init() {
   // Setup push notifications
   setupPushNotifications();
 
+  setCalendarDateBadge();
+
   // Load Google widgets
   loadGoogleWidgets();
+}
+
+function setCalendarDateBadge() {
+  const el = document.getElementById('calendarDateBadge');
+  if (!el) return;
+  el.textContent = new Date().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
+}
+
+function startOfDay(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function sameDay(a, b) {
+  return startOfDay(a).getTime() === startOfDay(b).getTime();
+}
+
+function formatTimeRange(start, end) {
+  const s = start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (!end) return s;
+  const e = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `${s} - ${e}`;
+}
+
+function setCalendarView(view = 'day') {
+  calendarView = view;
+  const titleEl = document.getElementById('calendarViewTitle');
+  if (titleEl) {
+    titleEl.textContent = view === 'week' ? 'Weekly Timeline' : view === 'month' ? 'Monthly Strategic Forecast' : "Today's Timeline";
+  }
+  const dayView = document.getElementById('calendarViewDay');
+  const weekView = document.getElementById('calendarViewWeek');
+  const monthView = document.getElementById('calendarViewMonth');
+  if (dayView) dayView.classList.toggle('hidden', view !== 'day');
+  if (weekView) weekView.classList.toggle('hidden', view !== 'week');
+  if (monthView) monthView.classList.toggle('hidden', view !== 'month');
+  updateCalendarRangeLabel();
+}
+
+function updateCalendarRangeLabel() {
+  const rangeEl = document.getElementById('calendarRangeLabel');
+  if (!rangeEl) return;
+  const now = new Date();
+  if (calendarView === 'day') {
+    rangeEl.textContent = now.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }).toUpperCase();
+    return;
+  }
+  if (calendarView === 'week') {
+    const start = new Date(now);
+    start.setDate(now.getDate() - now.getDay());
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    rangeEl.textContent = `${start.toLocaleDateString([], { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString([], { month: 'short', day: 'numeric' })}`.toUpperCase();
+    return;
+  }
+  rangeEl.textContent = now.toLocaleDateString([], { month: 'long', year: 'numeric' }).toUpperCase();
+}
+
+function buildDemoCalendarEvents() {
+  const now = new Date();
+  const mk = (dayOffset, hour, minute, durationMin, title) => {
+    const start = new Date(now);
+    start.setDate(now.getDate() + dayOffset);
+    start.setHours(hour, minute, 0, 0);
+    const end = new Date(start.getTime() + durationMin * 60000);
+    return { title, startTime: start.toISOString(), endTime: end.toISOString() };
+  };
+
+  return [
+    mk(0, 8, 30, 60, 'Morning Focus Sprint'),
+    mk(0, 10, 0, 90, 'Leadership Sync'),
+    mk(0, 13, 30, 90, 'Product Strategy Review'),
+    mk(1, 9, 0, 60, 'Architecture Deep Work'),
+    mk(2, 11, 30, 45, 'Stakeholder Update'),
+    mk(3, 15, 0, 60, 'Execution Debrief'),
+    mk(5, 12, 0, 90, 'Weekly Planning Block'),
+    mk(10, 10, 0, 60, 'Launch Readiness'),
+    mk(14, 14, 0, 90, 'Quarterly Objective Audit'),
+  ];
+}
+
+function normalizeCalendarEvents(events = []) {
+  return events.map((e, i) => {
+    const fallback = new Date();
+    fallback.setHours(9 + i, 0, 0, 0);
+    const start = e.startTime ? new Date(e.startTime) : fallback;
+    const end = e.endTime ? new Date(e.endTime) : new Date(start.getTime() + 60 * 60000);
+    return { title: e.title || 'Untitled Event', start, end };
+  }).sort((a, b) => a.start - b.start);
+}
+
+function renderCalendarDay(events = [], isDemo = false) {
+  const list = document.getElementById('calendarDayList');
+  if (!list) return;
+  const today = new Date();
+  const todays = events.filter(e => sameDay(e.start, today));
+
+  if (!todays.length) {
+    list.innerHTML = '<p class="empty-hint">No events today</p>';
+    return;
+  }
+
+  const demoTag = isDemo ? '<span class="calendar-demo-tag">DEMO</span>' : '';
+  list.innerHTML = todays.map(e => `
+    <div class="calendar-day-item">
+      <div class="calendar-day-time">${formatTimeRange(e.start, e.end)}</div>
+      <div class="calendar-day-content">
+        <div class="calendar-day-title">${esc(e.title)} ${demoTag}</div>
+        <div class="calendar-day-meta">${e.start.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderCalendarWeek(events = [], isDemo = false) {
+  const grid = document.getElementById('calendarWeekGrid');
+  if (!grid) return;
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(today.getDate() - today.getDay());
+  start.setHours(0, 0, 0, 0);
+  const demoTag = isDemo ? '<span class="calendar-demo-tag">DEMO</span>' : '';
+
+  let html = '';
+  for (let i = 0; i < 7; i++) {
+    const day = new Date(start);
+    day.setDate(start.getDate() + i);
+    const dayEvents = events.filter(e => sameDay(e.start, day));
+    html += `
+      <div class="calendar-week-col">
+        <div class="calendar-week-head">
+          <span>${day.toLocaleDateString([], { weekday: 'short' }).toUpperCase()}</span>
+          <strong>${String(day.getDate()).padStart(2, '0')}</strong>
+        </div>
+        <div class="calendar-week-list">
+          ${dayEvents.length ? dayEvents.map(e => `
+            <div class="calendar-week-item">
+              <div class="calendar-week-time">${e.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+              <div class="calendar-week-title">${esc(e.title)} ${demoTag}</div>
+            </div>
+          `).join('') : '<p class="calendar-week-empty">No events</p>'}
+        </div>
+      </div>
+    `;
+  }
+  grid.innerHTML = html;
+}
+
+function renderCalendarMonth(events = [], isDemo = false) {
+  const head = document.getElementById('calendarMonthHead');
+  const grid = document.getElementById('calendarMonthGrid');
+  if (!head || !grid) return;
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const startWeekDay = firstDay.getDay();
+  const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const demoTag = isDemo ? '<span class="calendar-demo-tag">DEMO</span>' : '';
+
+  head.innerHTML = dayNames.map(d => `<span>${d}</span>`).join('');
+
+  let html = '';
+  for (let i = 0; i < startWeekDay; i++) html += '<div class="calendar-month-cell is-empty"></div>';
+  for (let dayNum = 1; dayNum <= daysInMonth; dayNum++) {
+    const cellDate = new Date(year, month, dayNum);
+    const cellEvents = events.filter(e => sameDay(e.start, cellDate));
+    html += `
+      <div class="calendar-month-cell ${sameDay(cellDate, new Date()) ? 'is-today' : ''}">
+        <div class="calendar-month-date">${dayNum}</div>
+        <div class="calendar-month-events">
+          ${cellEvents.slice(0, 2).map(e => `<div class="calendar-month-event">${esc(e.title)} ${demoTag}</div>`).join('')}
+          ${cellEvents.length > 2 ? `<div class="calendar-month-more">+${cellEvents.length - 2} more</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+  grid.innerHTML = html;
+}
+
+function renderCalendarMetrics(events = []) {
+  const today = new Date();
+  const weekStart = new Date(today);
+  weekStart.setDate(today.getDate() - today.getDay());
+  weekStart.setHours(0, 0, 0, 0);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+
+  const todayCount = events.filter(e => sameDay(e.start, today)).length;
+  const weekCount = events.filter(e => e.start >= weekStart && e.start <= weekEnd).length;
+  const focusCount = events.filter(e => /focus|deep work|review|planning/i.test(e.title)).length;
+
+  const todayEl = document.getElementById('calendarMetricToday');
+  const weekEl = document.getElementById('calendarMetricWeek');
+  const focusEl = document.getElementById('calendarMetricFocus');
+  if (todayEl) todayEl.textContent = String(todayCount);
+  if (weekEl) weekEl.textContent = String(weekCount);
+  if (focusEl) focusEl.textContent = String(focusCount);
+}
+
+function renderCalendarViews(events = [], isDemo = false) {
+  calendarEventsCache = normalizeCalendarEvents(events);
+  calendarIsDemo = isDemo;
+  renderCalendarDay(calendarEventsCache, calendarIsDemo);
+  renderCalendarWeek(calendarEventsCache, calendarIsDemo);
+  renderCalendarMonth(calendarEventsCache, calendarIsDemo);
+  renderCalendarMetrics(calendarEventsCache);
+
+  const hint = document.getElementById('calendarDataHint');
+  if (hint) {
+    hint.textContent = isDemo
+      ? 'Showing demo events for UI preview. Connect Google for live data.'
+      : 'Live Google Calendar data connected.';
+  }
+
+  updateCalendarRangeLabel();
 }
 
 // ── Google Integration Widgets ──────────────────────
@@ -830,10 +1153,11 @@ async function loadGoogleWidgets() {
     const status = await api('/google/status');
     const btn = document.getElementById('googleConnectBtn');
     const btnText = document.getElementById('googleConnectText');
+    if (!btn || !btnText) return;
 
     if (status.connected) {
       btn.classList.add('connected');
-      btnText.textContent = '✓ Google Connected';
+      btnText.textContent = 'Google Connected';
       btn.onclick = async () => {
         if (confirm('Disconnect Google account?')) {
           await api('/google/disconnect');
@@ -844,39 +1168,15 @@ async function loadGoogleWidgets() {
       // Load Calendar
       try {
         const events = await api('/google/calendar/today');
-        const widget = document.getElementById('calendarWidget');
-        if (events.length > 0) {
-          widget.innerHTML = events.map(e => {
-            const time = e.startTime ? new Date(e.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'All day';
-            return `<div class="g-event-item">
-              <span class="g-event-time">${time}</span>
-              <span class="g-event-title">${esc(e.title)}</span>
-            </div>`;
-          }).join('');
-        } else {
-          widget.innerHTML = '<p class="empty-hint">No events today</p>';
-        }
-      } catch {}
-
-      // Load Gmail
-      try {
-        const emails = await api('/google/gmail/unread');
-        const widget = document.getElementById('gmailWidget');
-        if (emails.length > 0) {
-          widget.innerHTML = emails.map(e => `<div class="g-email-item">
-            <div>
-              <div class="g-email-from">${esc(e.from)}</div>
-              <div class="g-email-subject">${esc(e.subject)}</div>
-            </div>
-          </div>`).join('');
-        } else {
-          widget.innerHTML = '<p class="empty-hint">Inbox zero! 🎉</p>';
-        }
-      } catch {}
-
+        renderCalendarViews(events, false);
+      } catch {
+        renderCalendarViews([], false);
+      }
     } else if (status.hasCredentials) {
       // Credentials saved but not yet authorized
+      btn.classList.remove('connected');
       btnText.textContent = 'Authorize Google';
+      renderCalendarViews(buildDemoCalendarEvents(), true);
       btn.onclick = async () => {
         try {
           const data = await api('/google/auth-url');
@@ -887,7 +1187,9 @@ async function loadGoogleWidgets() {
       };
     } else {
       // No credentials at all - prompt user to enter them
+      btn.classList.remove('connected');
       btnText.textContent = 'Connect Google';
+      renderCalendarViews(buildDemoCalendarEvents(), true);
       btn.onclick = () => {
         const clientId = prompt('Enter your Google OAuth Client ID:\n\n(Get it from Google Cloud Console → Credentials)');
         if (!clientId) return;
@@ -913,3 +1215,6 @@ async function loadGoogleWidgets() {
 }
 
 init();
+
+
+

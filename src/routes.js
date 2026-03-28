@@ -134,6 +134,11 @@ router.patch('/tasks/:id', async (req, res) => {
     res.json({ message: 'Task updated' });
 });
 
+router.delete('/tasks/:id', (req, res) => {
+    db.deleteTask(req.params.id);
+    res.json({ message: 'Task deleted' });
+});
+
 // ── Events ──────────────────────────────────────────────
 router.get('/events', (req, res) => {
     res.json(db.getEvents());
@@ -237,6 +242,9 @@ router.post('/trigger', async (req, res) => {
 // ── Helper: extract data from chat and store ────────────
 async function extractAndStore(message) {
     const extracted = await llm.extractFromMessage(message);
+    let reminderConfigChanged = false;
+    const relativeReminderTime = parseRelativeReminderTime(message);
+    const removeAllByMessage = shouldRemoveAllReminders(message);
 
     if (extracted.goals) {
         for (const g of extracted.goals) {
@@ -271,17 +279,116 @@ async function extractAndStore(message) {
         }
     }
     if (extracted.reminders) {
-        let addedCron = false;
         for (const r of extracted.reminders) {
-            db.addReminder(r.title, r.time_rule, r.is_recurring ? 1 : 0);
-            addedCron = true;
-        }
-        if (addedCron) {
-            // Tell the scheduler to pick up the new cron jobs immediately
-            const { reloadCrons } = require('./scheduler');
-            reloadCrons();
+            let title = String(r.title || '').trim();
+            let timeRule = typeof r.time_rule === 'string' ? r.time_rule.trim() : '';
+            let isRecurring = r.is_recurring ? 1 : 0;
+
+            // Hard guardrail: any relative-time reminder in message is always one-time ISO.
+            if (relativeReminderTime) {
+                timeRule = relativeReminderTime;
+                isRecurring = 0;
+            }
+
+            if (!title) title = inferReminderTitleFromMessage(message) || 'Reminder';
+            if (!timeRule) continue;
+
+            // Avoid duplicate active reminders for same title (common after repeated "in 10 sec" tests).
+            const activeReminders = db.getActiveReminders();
+            const titleNorm = title.toLowerCase();
+            for (const existing of activeReminders) {
+                const existingNorm = String(existing.title || '').trim().toLowerCase();
+                const sameTopic = existingNorm === titleNorm || existingNorm.includes(titleNorm) || titleNorm.includes(existingNorm);
+                if (sameTopic) {
+                    db.deactivateReminder(existing.id);
+                }
+            }
+
+            db.addReminder(title, timeRule, isRecurring);
+            reminderConfigChanged = true;
         }
     }
+    if (extracted.remove_reminders || removeAllByMessage) {
+        const activeReminders = db.getActiveReminders();
+        const removeConfig = extracted.remove_reminders || {};
+        const mode = removeConfig.match_mode === 'exact' ? 'exact' : 'contains';
+        const titles = Array.isArray(removeConfig.titles)
+            ? removeConfig.titles.map(t => String(t || '').trim().toLowerCase()).filter(Boolean)
+            : [];
+
+        const shouldRemoveAll = !!removeConfig.all || removeAllByMessage || (!titles.length && /reminder|cron/i.test(String(message || '')));
+
+        if (shouldRemoveAll) {
+            for (const r of activeReminders) db.deactivateReminder(r.id);
+            reminderConfigChanged = activeReminders.length > 0 || reminderConfigChanged;
+        } else if (titles.length > 0) {
+            for (const r of activeReminders) {
+                const title = String(r.title || '').toLowerCase();
+                const isMatch = titles.some(t => mode === 'exact' ? title === t : title.includes(t));
+                if (isMatch) {
+                    db.deactivateReminder(r.id);
+                    reminderConfigChanged = true;
+                }
+            }
+        }
+    }
+    if (reminderConfigChanged) {
+        // Tell the scheduler to pick up reminder changes immediately.
+        const { reloadCrons } = require('./scheduler');
+        reloadCrons();
+    }
+}
+
+function parseRelativeReminderTime(message) {
+    if (!message) return null;
+    const text = String(message).toLowerCase();
+    const match = text.match(/\b(?:in|after)\s*(\d+)\s*(seconds?|secs?|sec|s|minutes?|mins?|min|m|hours?|hrs?|hr|h)\b/);
+    if (!match) return null;
+
+    const amount = parseInt(match[1], 10);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+
+    const unit = match[2];
+    let ms = 0;
+    if (unit === 's' || unit.startsWith('sec')) ms = amount * 1000;
+    else if (unit === 'm' || unit.startsWith('min')) ms = amount * 60 * 1000;
+    else ms = amount * 60 * 60 * 1000;
+
+    return new Date(Date.now() + ms).toISOString();
+}
+
+function inferReminderTitleFromMessage(message) {
+    if (!message) return '';
+    const raw = String(message);
+    const text = raw.toLowerCase();
+
+    const afterFor = text.match(/\bfor\s+(.+)$/);
+    if (afterFor && afterFor[1]) {
+        const cleaned = afterFor[1]
+            .replace(/\b(?:in|after)\s*\d+\s*(?:seconds?|secs?|sec|s|minutes?|mins?|min|m|hours?|hrs?|hr|h)\b/gi, '')
+            .replace(/[.?!]+$/g, '')
+            .trim();
+        if (cleaned.length >= 2) return cleaned;
+    }
+
+    const remindTo = text.match(/\bremind me to\s+(.+)$/);
+    if (remindTo && remindTo[1]) {
+        const cleaned = remindTo[1]
+            .replace(/\b(?:in|after)\s*\d+\s*(?:seconds?|secs?|sec|s|minutes?|mins?|min|m|hours?|hrs?|hr|h)\b/gi, '')
+            .replace(/[.?!]+$/g, '')
+            .trim();
+        if (cleaned.length >= 2) return cleaned;
+    }
+
+    return '';
+}
+
+function shouldRemoveAllReminders(message) {
+    if (!message) return false;
+    const text = String(message).toLowerCase();
+    const hasRemoveVerb = /\b(remove|delete|cancel|clear|discard|stop)\b/.test(text);
+    const hasReminderWord = /\b(reminder|reminders|cron|crons)\b/.test(text);
+    return hasRemoveVerb && hasReminderWord;
 }
 
 // ── Productivity Score ──────────────────────────────────
@@ -383,8 +490,22 @@ router.get('/google/disconnect', (req, res) => {
 
 router.get('/google/calendar/today', async (req, res) => {
     try {
-        const events = await googleCalendar.getTodayEvents();
+        const events = await googleCalendar.getCalendarWindowEvents();
         res.json(events);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/google/calendar/sync-today', async (req, res) => {
+    try {
+        if (!googleAuth.isConnected()) {
+            return res.status(400).json({ error: 'Google is not connected' });
+        }
+        const tasks = db.getTasks();
+        const goals = db.getGoals();
+        const result = await googleCalendar.syncTodayPlanToCalendar(tasks, goals);
+        res.json({ success: true, ...result });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

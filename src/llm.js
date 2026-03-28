@@ -61,6 +61,7 @@ Rules:
 - If the user asks for a persistent objective, provide a highly detailed, comprehensive quest-like roadmap in "roadmap_steps". Do NOT give 3 steps. You MUST provide at least 8 to 12 distinct, actionable steps that walk the user completely from start to finish.
 - If the user asks for a daily/weekly reminder or a cron job, add it to "reminders" with a standard 5-part cron expression for "time_rule".
 - If the user specifies a relative or exact one-time reminder (e.g., "in 15 minutes" or "at 3 PM"), strictly calculate the exact future ISO timestamp based on the CURRENT TIME and provide that timestamp for "time_rule" with "is_recurring" set to false.
+- NEVER return a cron expression for relative one-time reminders like "in 10 sec", "in 5 minutes", "after 1 hour".
 - If the user asks to remove/delete/cancel reminders or cron jobs, use "remove_reminders".
   - Use {"all": true} when they mean all reminders.
   - Use {"titles":[...], "match_mode":"contains"} when they mention reminder names loosely.

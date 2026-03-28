@@ -9,6 +9,7 @@ const REDIRECT_URI = 'http://localhost:3000/api/google/callback';
 
 const SCOPES = [
     'https://www.googleapis.com/auth/calendar.readonly',
+    'https://www.googleapis.com/auth/calendar.events',
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.send',
 ];

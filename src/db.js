@@ -141,6 +141,7 @@ const getTasksByGoal = db.prepare(`SELECT * FROM tasks WHERE goal_id = ? ORDER B
 const updateTaskStatus = db.prepare(`UPDATE tasks SET status = ? WHERE id = ?`);
 const getPendingTasks = db.prepare(`SELECT * FROM tasks WHERE status = 'pending' ORDER BY deadline ASC`);
 const getTaskById = db.prepare(`SELECT * FROM tasks WHERE id = ?`);
+const deleteTask = db.prepare(`DELETE FROM tasks WHERE id = ?`);
 
 // ── Events ──────────────────────────────────────────────
 const addEvent = db.prepare(`INSERT INTO events (title, date, importance) VALUES (?, ?, ?)`);
@@ -213,6 +214,7 @@ module.exports = {
   updateTaskStatus: (id, status) => updateTaskStatus.run(status, id),
   getPendingTasks: () => getPendingTasks.all(),
   getTaskById: (id) => getTaskById.get(id),
+  deleteTask: (id) => deleteTask.run(id),
 
   // Events
   addEvent: (title, date, importance = 'medium') => addEvent.run(title, date, importance),

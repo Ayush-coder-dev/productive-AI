@@ -243,7 +243,7 @@ function reloadCrons() {
     for (const r of reminders) {
         if (cron.validate(r.time_rule)) {
             activeCrons[r.id] = cron.schedule(r.time_rule, () => {
-                const msg = `It's time for to focus on: ${r.title}`;
+                const msg = `It's time to focus on: ${r.title}`;
                 db.addProactiveMessage('reminder', msg, 'Scheduled cron reminder');
                 sendPushToAll('Augment AI - Reminder', msg, 'reminder').catch(()=>{});
                 sendNotificationEmail('Augment AI - Reminder', msg).catch(() => {});
@@ -281,14 +281,14 @@ function startScheduler() {
     // Load initial cron reminders
     reloadCrons();
 
-    // Minute-by-minute check for ISO date (one-off) reminders
-    cron.schedule('* * * * *', () => {
+    // High-frequency check for one-off ISO reminders so short windows like "in 10 sec" fire on time.
+    cron.schedule('*/2 * * * * *', () => {
         const reminders = db.getActiveReminders();
         const now = Date.now();
         for (const r of reminders) {
             if (!cron.validate(r.time_rule)) {
                 const triggerTime = new Date(r.time_rule).getTime();
-                if (triggerTime && now >= triggerTime) {
+                if (Number.isFinite(triggerTime) && now >= triggerTime) {
                     const msg = `Reminder: ${r.title}`;
                     db.addProactiveMessage('reminder', msg, 'Scheduled time reminder');
                     sendPushToAll('Augment AI - Reminder', msg, 'reminder').catch(()=>{});

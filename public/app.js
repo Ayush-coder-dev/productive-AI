@@ -15,6 +15,12 @@ const TIMER_CIRC = 2 * Math.PI * 52;
 let calendarView = 'day';
 let calendarEventsCache = [];
 let calendarIsDemo = false;
+let lastCalendarError = '';
+const TAB_STORAGE_KEY = 'augment_active_tab';
+const HOME_HISTORY_HIDDEN_KEY = 'augment_home_history_hidden';
+const PIPELINE_COMPLETED_COLLAPSED_KEY = 'augment_pipeline_completed_collapsed';
+let latestTasksCache = [];
+let latestGoalsCache = [];
 
 // ── API helper ──────────────────────────────────────
 async function api(path, opts = {}) {
@@ -66,11 +72,66 @@ function formatCronHuman(cronExpr) {
   return null;
 }
 
+function notifyCalendarErrorOnce(msg) {
+  if (!msg) return;
+  if (lastCalendarError === msg) return;
+  lastCalendarError = msg;
+  notify(msg, 7000);
+}
+
 // ── Navigation ──────────────────────────────────────
 document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 
+function getSavedTab() {
+  try {
+    const saved = localStorage.getItem(TAB_STORAGE_KEY);
+    const allowed = ['home', 'strategy', 'velocity', 'rituals', 'calendar'];
+    return allowed.includes(saved) ? saved : 'home';
+  } catch {
+    return 'home';
+  }
+}
+
+function setSavedTab(tab) {
+  try { localStorage.setItem(TAB_STORAGE_KEY, tab); } catch {}
+}
+
+function isHomeHistoryHidden() {
+  try {
+    const raw = localStorage.getItem(HOME_HISTORY_HIDDEN_KEY);
+    if (raw === null) return true;
+    return raw === '1';
+  } catch {
+    return true;
+  }
+}
+
+function setHomeHistoryHidden(hidden) {
+  try { localStorage.setItem(HOME_HISTORY_HIDDEN_KEY, hidden ? '1' : '0'); } catch {}
+}
+
+function applyHomeHistoryHidden(hidden) {
+  const layout = document.querySelector('.home-layout');
+  if (layout) layout.classList.toggle('hide-history', !!hidden);
+}
+
+function isPipelineCompletedCollapsed() {
+  try {
+    const raw = localStorage.getItem(PIPELINE_COMPLETED_COLLAPSED_KEY);
+    if (raw === null) return true;
+    return raw === '1';
+  } catch {
+    return true;
+  }
+}
+
+function setPipelineCompletedCollapsed(collapsed) {
+  try { localStorage.setItem(PIPELINE_COMPLETED_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch {}
+}
+
 function switchTab(tab) {
   currentTab = tab;
+  setSavedTab(tab);
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === `tab-${tab}`));
 
@@ -112,6 +173,18 @@ const chatFeed = document.getElementById('chatMessages');
 const chatInput = document.getElementById('chatInput');
 const sendBtn = document.getElementById('sendBtn');
 let currentSessionId = null;
+const DURATION_PROFILE_KEY = 'augment_duration_profile_v1';
+const TASK_CHECK_STORAGE_KEY = 'augment_task_completion_checks_v1';
+const TASK_CHECK_SNOOZE_MIN = 10;
+const DURATION_PRESETS = {
+  coding: [30, 60, 90, 120],
+  learning: [30, 45, 60, 90],
+  exercise: [20, 30, 45, 60],
+  meeting: [15, 30, 45, 60],
+  planning: [15, 30, 45, 60],
+  writing: [25, 45, 60, 90],
+  default: [30, 60, 120],
+};
 
 chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 chatInput.addEventListener('input', () => { chatInput.style.height = 'auto'; chatInput.style.height = Math.min(chatInput.scrollHeight, 100) + 'px'; });
@@ -134,12 +207,424 @@ async function sendMessage() {
         loadSessions();
     }
     typing.remove();
-    appendMsg('assistant', data.reply || 'Apologies — I couldn\'t process that directive.');
+    const assistantReply = data.reply || 'Apologies - I could not process that directive.';
+    appendMsg('assistant', assistantReply);
+    const taskHint = inferTaskFromText(msg);
+    if (taskHint) appendDurationPicker(taskHint);
   } catch {
     typing.remove();
-    appendMsg('assistant', 'Connection error — is Ollama running?');
+    appendMsg('assistant', 'Connection error - is Ollama running?');
   }
   loadSidebarStats();
+}
+
+function inferTaskFromText(text) {
+  if (!text) return null;
+  const normalized = String(text).replace(/\s+/g, ' ').trim();
+  if (normalized.length < 4) return null;
+  const lower = normalized.toLowerCase();
+  const looksLikeSmallTalk = /^(hi|hello|hey|yo|how are you|how do you do|good morning|good afternoon|good evening)\b/.test(lower);
+  const looksLikeQuestion = /\?$/.test(normalized) || /^(what|why|how|when|where)\b/.test(lower);
+  const explicitTaskIntent = /(remind me to|remember to|i need to|i have to|i should|let's|task\s*[:\-]|objective\s*[:\-]|goal\s*[:\-]|work on|start|finish|complete|practice|learn|study|write|read|build|plan)/.test(lower);
+
+  if (looksLikeSmallTalk && !explicitTaskIntent) return null;
+  // Avoid showing time picker for normal knowledge questions.
+  if (looksLikeQuestion && !explicitTaskIntent) return null;
+
+  const patterns = [
+    /(?:remind me to|remember to|i need to|i have to|i should|let's)\s+([^.!?\n]{3,90})/i,
+    /(?:task|objective|goal)\s*[:\-]\s*([^.!?\n]{3,90})/i,
+    /(?:work on|start|finish|complete|practice|learn|study|write|read|build|plan)\s+([^.!?\n]{3,90})/i,
+  ];
+
+  let candidate = null;
+  for (const re of patterns) {
+    const hit = normalized.match(re);
+    if (hit && hit[1]) {
+      candidate = hit[1];
+      break;
+    }
+  }
+
+  if (!candidate && !looksLikeQuestion && /(learn|study|practice|work on|build|write|read|exercise|workout|review|plan|debug|design|coding)/.test(lower)) {
+    candidate = normalized;
+  }
+
+  if (!candidate) return null;
+  let clean = candidate
+    .replace(/^to\s+/i, '')
+    .replace(/\b(?:today|tonight|tomorrow|right now|now)\b/gi, '')
+    .replace(/\bfor\s+\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\b.*$/i, '')
+    .replace(/[.;:,\-]+$/g, '')
+    .trim();
+
+  if (clean.length < 3) return null;
+  if (clean.length > 80) clean = clean.slice(0, 80).trim();
+  return clean;
+}
+
+function classifyTask(taskText) {
+  const t = String(taskText || '').toLowerCase();
+  if (/(code|coding|program|debug|dev|feature|bug|build app|javascript|python)/.test(t)) return 'coding';
+  if (/(learn|study|course|tutorial|reading|read|revise|practice)/.test(t)) return 'learning';
+  if (/(workout|exercise|gym|run|walk|yoga|training)/.test(t)) return 'exercise';
+  if (/(meeting|call|sync|standup|1:1|interview)/.test(t)) return 'meeting';
+  if (/(plan|planning|roadmap|strategy|priorit|organize)/.test(t)) return 'planning';
+  if (/(write|draft|blog|doc|documentation|journal)/.test(t)) return 'writing';
+  return 'default';
+}
+
+function getDurationProfile() {
+  try {
+    const raw = localStorage.getItem(DURATION_PROFILE_KEY);
+    if (!raw) return { global: {}, byCategory: {} };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { global: {}, byCategory: {} };
+    return {
+      global: parsed.global && typeof parsed.global === 'object' ? parsed.global : {},
+      byCategory: parsed.byCategory && typeof parsed.byCategory === 'object' ? parsed.byCategory : {},
+    };
+  } catch {
+    return { global: {}, byCategory: {} };
+  }
+}
+
+function saveDurationProfile(profile) {
+  try { localStorage.setItem(DURATION_PROFILE_KEY, JSON.stringify(profile)); } catch {}
+}
+
+function getTopDurationMinutes(bucket) {
+  return Object.entries(bucket || {})
+    .map(([min, count]) => [Number(min), Number(count)])
+    .filter(([min, count]) => Number.isFinite(min) && min > 0 && Number.isFinite(count) && count > 0)
+    .sort((a, b) => (b[1] - a[1]) || (a[0] - b[0]))
+    .map(([min]) => min);
+}
+
+function normalizeMinuteValue(min) {
+  const rounded = Math.round(Number(min) / 5) * 5;
+  return Math.min(240, Math.max(10, rounded));
+}
+
+function getSuggestedDurations(taskText) {
+  const category = classifyTask(taskText);
+  const profile = getDurationProfile();
+  const categoryTop = getTopDurationMinutes(profile.byCategory[category] || {});
+  const globalTop = getTopDurationMinutes(profile.global || {});
+  const anchor = categoryTop[0] || globalTop[0] || null;
+  const preset = DURATION_PRESETS[category] || DURATION_PRESETS.default;
+
+  if (!anchor) return [...preset];
+
+  const around = [anchor - 15, anchor, anchor + 15, anchor + 45]
+    .map(normalizeMinuteValue)
+    .filter((m, i, arr) => arr.indexOf(m) === i);
+
+  const filled = [...around];
+  for (const m of preset) {
+    if (filled.length >= 4) break;
+    if (!filled.includes(m)) filled.push(m);
+  }
+  return filled.sort((a, b) => a - b).slice(0, 4);
+}
+
+function formatDurationLabel(min) {
+  if (min % 60 === 0) return `${min / 60} hour${min === 60 ? '' : 's'}`;
+  if (min > 60) {
+    const h = Math.floor(min / 60);
+    const m = min % 60;
+    return `${h}h ${m}m`;
+  }
+  return `${min} min`;
+}
+
+function parseDurationInput(raw) {
+  const text = String(raw || '').trim().toLowerCase();
+  if (!text) return null;
+
+  const compact = text.replace(/\s+/g, '');
+  const hm = compact.match(/^(\d{1,2})h(?:(\d{1,2})m?)?$/);
+  if (hm) {
+    const h = Number(hm[1]);
+    const m = Number(hm[2] || 0);
+    return normalizeMinuteValue(h * 60 + m);
+  }
+
+  const minOnly = compact.match(/^(\d{1,3})(m|min|mins|minute|minutes)?$/);
+  if (minOnly) return normalizeMinuteValue(Number(minOnly[1]));
+
+  const hrWords = text.match(/^(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)$/);
+  if (hrWords) return normalizeMinuteValue(Number(hrWords[1]) * 60);
+
+  const withWords = text.match(/^(\d{1,2})\s*(?:hour|hours|hr|hrs)\s*(\d{1,2})?\s*(?:min|mins|minute|minutes|m)?$/);
+  if (withWords) return normalizeMinuteValue(Number(withWords[1]) * 60 + Number(withWords[2] || 0));
+
+  const colon = text.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (colon) return normalizeMinuteValue(Number(colon[1]) * 60 + Number(colon[2]));
+
+  return null;
+}
+
+function rememberDurationChoice(taskText, minute) {
+  const min = normalizeMinuteValue(minute);
+  const category = classifyTask(taskText);
+  const profile = getDurationProfile();
+
+  const globalKey = String(min);
+  profile.global[globalKey] = (profile.global[globalKey] || 0) + 1;
+  profile.byCategory[category] = profile.byCategory[category] || {};
+  profile.byCategory[category][globalKey] = (profile.byCategory[category][globalKey] || 0) + 1;
+
+  saveDurationProfile(profile);
+}
+
+function getPendingTaskChecks() {
+  try {
+    const raw = localStorage.getItem(TASK_CHECK_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePendingTaskChecks(list) {
+  try { localStorage.setItem(TASK_CHECK_STORAGE_KEY, JSON.stringify(list || [])); } catch {}
+}
+
+function upsertPendingTaskCheck(check) {
+  const list = getPendingTaskChecks();
+  const idx = list.findIndex((it) => it.id === check.id);
+  if (idx >= 0) list[idx] = check;
+  else list.push(check);
+  savePendingTaskChecks(list);
+}
+
+function removePendingTaskCheck(id) {
+  const list = getPendingTaskChecks().filter((it) => it.id !== id);
+  savePendingTaskChecks(list);
+}
+
+const taskCheckTimers = {};
+
+function clearTaskCheckTimer(id) {
+  if (taskCheckTimers[id]) {
+    clearTimeout(taskCheckTimers[id]);
+    delete taskCheckTimers[id];
+  }
+}
+
+function scheduleTaskCompletionCheck(taskText, minutes) {
+  const now = Date.now();
+  const check = {
+    id: `task_check_${now}_${Math.random().toString(36).slice(2, 8)}`,
+    task: String(taskText || '').trim(),
+    duration_min: normalizeMinuteValue(minutes),
+    due_ts: new Date(now + normalizeMinuteValue(minutes) * 60000).toISOString(),
+    created_ts: new Date(now).toISOString(),
+  };
+  upsertPendingTaskCheck(check);
+  armTaskCompletionCheck(check);
+
+  const dueLabel = new Date(check.due_ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  appendMsg('assistant', `Plan set. I will check at ${dueLabel} if "${check.task}" is completed. Stats will update only after your confirmation.`);
+}
+
+function armTaskCompletionCheck(check) {
+  clearTaskCheckTimer(check.id);
+  const dueMs = new Date(check.due_ts).getTime();
+  const delay = Math.max(600, dueMs - Date.now());
+  taskCheckTimers[check.id] = setTimeout(() => promptTaskCompletionCheck(check.id), delay);
+}
+
+function resumeTaskCompletionChecks() {
+  const list = getPendingTaskChecks();
+  if (!list.length) return;
+  list.forEach((check) => {
+    const dueMs = new Date(check.due_ts).getTime();
+    if (!Number.isFinite(dueMs)) {
+      removePendingTaskCheck(check.id);
+      return;
+    }
+    if (dueMs <= Date.now()) promptTaskCompletionCheck(check.id);
+    else armTaskCompletionCheck(check);
+  });
+}
+
+function normalizeTaskText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoreTaskMatch(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 100;
+  if (a.includes(b) || b.includes(a)) return 80;
+
+  const aw = a.split(' ').filter((w) => w.length > 2);
+  const bw = b.split(' ').filter((w) => w.length > 2);
+  if (!aw.length || !bw.length) return 0;
+  let overlap = 0;
+  aw.forEach((w) => { if (bw.includes(w)) overlap += 1; });
+  return Math.round((overlap / Math.max(aw.length, bw.length)) * 60);
+}
+
+async function markMatchingTaskCompleted(taskName) {
+  try {
+    const tasks = await api('/tasks');
+    const normalizedTarget = normalizeTaskText(taskName);
+    const pending = tasks.filter((t) => t.status !== 'completed');
+    if (!pending.length) return false;
+
+    const best = pending
+      .map((t) => ({ task: t, score: scoreTaskMatch(normalizeTaskText(t.title), normalizedTarget) }))
+      .sort((a, b) => b.score - a.score)[0];
+
+    if (!best || best.score < 45) return false;
+
+    await api(`/tasks/${best.task.id}`, { method: 'PATCH', body: { status: 'completed' } });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function promptTaskCompletionCheck(id) {
+  clearTaskCheckTimer(id);
+  const check = getPendingTaskChecks().find((it) => it.id === id);
+  if (!check) return;
+
+  const d = document.createElement('div');
+  d.className = 'message assistant';
+  d.innerHTML = `
+    <div class="msg-avatar"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+    <div>
+      <div class="msg-body duration-msg">
+        <div class="duration-msg-title">Time check: "${esc(check.task)}"</div>
+        <div class="duration-msg-meta">Did you complete it?</div>
+        <div class="duration-chip-row">
+          <button class="duration-chip duration-chip-success">Yes, completed</button>
+          <button class="duration-chip duration-chip-muted">Not yet (+10m)</button>
+        </div>
+      </div>
+      <div class="msg-time">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+    </div>
+  `;
+
+  chatFeed.appendChild(d);
+  chatFeed.scrollTop = chatFeed.scrollHeight;
+
+  const buttons = Array.from(d.querySelectorAll('.duration-chip'));
+  const yesBtn = buttons[0];
+  const noBtn = buttons[1];
+  const meta = d.querySelector('.duration-msg-meta');
+  let handled = false;
+
+  yesBtn.addEventListener('click', async () => {
+    if (handled) return;
+    handled = true;
+    buttons.forEach((b) => { b.disabled = true; });
+
+    try {
+      await api('/activity', {
+        method: 'POST',
+        body: { action: 'Completed Planned Task', task: check.task, duration_min: check.duration_min },
+      });
+      const linked = await markMatchingTaskCompleted(check.task);
+      meta.textContent = linked
+        ? 'Great work. Completed and linked task marked done.'
+        : 'Great work. Completed and stats updated.';
+      removePendingTaskCheck(check.id);
+      await Promise.allSettled([loadSidebarStats(), loadTasksAndGoals(), loadAnalytics()]);
+    } catch {
+      handled = false;
+      buttons.forEach((b) => { b.disabled = false; });
+      meta.textContent = 'Could not update right now. Please try again.';
+    }
+  });
+
+  noBtn.addEventListener('click', () => {
+    if (handled) return;
+    handled = true;
+    buttons.forEach((b) => { b.disabled = true; });
+    const nextDue = new Date(Date.now() + TASK_CHECK_SNOOZE_MIN * 60000).toISOString();
+    upsertPendingTaskCheck({ ...check, due_ts: nextDue });
+    armTaskCompletionCheck({ ...check, due_ts: nextDue });
+    meta.textContent = `No problem. I will ask again in ${TASK_CHECK_SNOOZE_MIN} minutes.`;
+  });
+}
+
+function appendDurationPicker(taskText) {
+  const pickedTask = String(taskText || '').trim();
+  if (!pickedTask) return;
+  const suggestions = getSuggestedDurations(pickedTask);
+
+  const d = document.createElement('div');
+  d.className = 'message assistant';
+  d.innerHTML = `
+    <div class="msg-avatar"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+    <div>
+      <div class="msg-body duration-msg">
+        <div class="duration-msg-title">How long do you want to spend on "${esc(pickedTask)}"?</div>
+        <div class="duration-chip-row"></div>
+        <div class="duration-custom-row">
+          <input class="duration-custom-input" type="text" placeholder="Custom (e.g. 45m or 1h 30m)" />
+          <button class="duration-custom-btn">Set</button>
+        </div>
+        <div class="duration-msg-meta">Tip: I will personalize these options based on what you often choose.</div>
+      </div>
+      <div class="msg-time">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+    </div>
+  `;
+
+  chatFeed.appendChild(d);
+  chatFeed.scrollTop = chatFeed.scrollHeight;
+
+  const chipRow = d.querySelector('.duration-chip-row');
+  const input = d.querySelector('.duration-custom-input');
+  const btn = d.querySelector('.duration-custom-btn');
+  const meta = d.querySelector('.duration-msg-meta');
+  let submitted = false;
+
+  const submitChoice = async (minutes) => {
+    if (submitted) return;
+    submitted = true;
+    rememberDurationChoice(pickedTask, minutes);
+    const durationText = formatDurationLabel(minutes);
+    meta.textContent = `Planned: ${durationText}. I will ask at the end if you completed it.`;
+    d.querySelectorAll('.duration-chip, .duration-custom-btn, .duration-custom-input').forEach(el => el.disabled = true);
+    appendMsg('user', `${pickedTask} - ${durationText}`);
+    scheduleTaskCompletionCheck(pickedTask, minutes);
+  };
+
+  suggestions.forEach((min) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'duration-chip';
+    chip.textContent = formatDurationLabel(min);
+    chip.addEventListener('click', () => submitChoice(min));
+    chipRow.appendChild(chip);
+  });
+
+  btn.addEventListener('click', () => {
+    const parsed = parseDurationInput(input.value);
+    if (!parsed) {
+      meta.textContent = 'Use formats like 45m, 1h, or 1h 30m.';
+      input.focus();
+      return;
+    }
+    submitChoice(parsed);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      btn.click();
+    }
+  });
 }
 
 function appendMsg(role, content, ts) {
@@ -199,7 +684,10 @@ const toggleHistoryBtn = document.getElementById('toggleHistoryBtn');
 if (toggleHistoryBtn) {
     toggleHistoryBtn.addEventListener('click', () => {
         const layout = document.querySelector('.home-layout');
-        if (layout) layout.classList.toggle('hide-history');
+        if (!layout) return;
+        const nextHidden = !layout.classList.contains('hide-history');
+        applyHomeHistoryHidden(nextHidden);
+        setHomeHistoryHidden(nextHidden);
     });
 }
 
@@ -542,6 +1030,7 @@ async function loadTasksAndGoals() {
       const icons = { productivity: '📊', learning: '🎓', health: '❤️', other: '⚡' };
       const iconClass = { productivity: 'ico-prod', learning: 'ico-learn', health: 'ico-health', other: 'ico-other' };
       const tc = tasks.filter(t => t.goal_id === g.id);
+      const activeStepId = (tc.find(t => t.status !== 'completed') || {}).id;
       const done = tc.filter(t => t.status === 'completed').length;
       const pct = tc.length ? Math.round((done / tc.length) * 100) : g.progress;
       return `<div class="obj-card" id="obj-card-${g.id}">
@@ -553,13 +1042,27 @@ async function loadTasksAndGoals() {
           <div class="obj-bar-track"><div class="obj-bar-fill" style="width:${pct}%"></div></div>
         </div>
         <div class="obj-roadmap ${objectiveViewMode === 'long' ? '' : 'hidden'}" id="roadmap-${g.id}">
-          ${tc.map((t, index) => `<div class="roadmap-step ${t.status==='completed'?'done':''}" onclick="toggleTask(${t.id},'${t.status}')">
-            <div class="step-node"></div>
-            <div class="step-content">
-              <div class="step-level">Level ${index + 1}</div>
-              <div class="step-title">${esc(t.title)}</div>
-            </div>
-          </div>`).join('')}
+          <div class="roadmap-head">
+            <span class="roadmap-kicker">Strategic Roadmap</span>
+            <span class="roadmap-progress-chip">${pct}% complete</span>
+          </div>
+          ${tc.length ? tc.map((t, index) => {
+            const state = t.status === 'completed' ? 'done' : (t.id === activeStepId ? 'active' : 'queued');
+            const stateLabel = state === 'done' ? 'Done' : (state === 'active' ? 'Active' : 'Queued');
+            const dueLabel = t.deadline ? relDate(t.deadline) : 'No deadline';
+            const priorityLabel = (t.priority || 'medium').toUpperCase();
+            return `<button class="roadmap-step ${state}" onclick="toggleTask(${t.id},'${t.status}')">
+              <div class="step-node"></div>
+              <div class="step-content">
+                <div class="step-meta">
+                  <span class="step-level">Stage ${String(index + 1).padStart(2, '0')}</span>
+                  <span class="step-state ${state}">${stateLabel}</span>
+                </div>
+                <div class="step-title">${esc(t.title)}</div>
+                <div class="step-sub">${dueLabel} | ${priorityLabel} PRIORITY</div>
+              </div>
+            </button>`;
+          }).join('') : `<div class="roadmap-empty">No tasks yet. Add a task to generate this roadmap.</div>`}
           <button class="mark-obj-btn" onclick="toggleGoal(${g.id},'${g.status}')">${g.status === 'completed' ? 'Reopen Objective' : 'Claim Final Reward (Complete)'}</button>
           <button class="discard-obj-btn" onclick="discardGoal(${g.id}, event)">Discard Objective</button>
         </div>
@@ -567,25 +1070,207 @@ async function loadTasksAndGoals() {
     }).join('');
   }
 
-  // Task pipeline
-  let ft = tasks;
-  if (taskFilter === 'active') ft = tasks.filter(t => t.status === 'pending');
-  if (taskFilter === 'completed') ft = tasks.filter(t => t.status === 'completed');
-
-  const tl = document.getElementById('tasksList');
-  if (!ft.length) {
-    tl.innerHTML = `<p class="pipeline-empty">${taskFilter === 'all' ? 'No tasks in pipeline' : 'No ' + taskFilter + ' tasks'}</p>`;
-  } else {
-    tl.innerHTML = ft.map((t, i) => `<div class="pipeline-item ${t.status==='completed'?'completed':''}" style="animation-delay:${i*.03}s">
-      <button class="task-check ${t.status==='completed'?'done':''}" onclick="toggleTask(${t.id},'${t.status}')">${t.status==='completed'?'✓':''}</button>
-      <div class="task-body">
-        <div class="task-name">${esc(t.title)}</div>
-        <div class="task-due">${t.deadline ? relDate(t.deadline) : ''}</div>
-      </div>
-      <span class="task-priority tp-${t.priority}">${t.priority.toUpperCase()}</span>
-    </div>`).join('');
-  }
+  latestGoalsCache = goals;
+  latestTasksCache = tasks;
+  renderTaskPipeline(tasks, goals);
 }
+
+function taskPriorityRank(priority) {
+  const ranks = { high: 0, medium: 1, low: 2 };
+  return ranks[String(priority || 'medium').toLowerCase()] ?? 1;
+}
+
+function taskDeadlineMs(task) {
+  if (!task || !task.deadline) return Number.POSITIVE_INFINITY;
+  const d = new Date(`${task.deadline}T00:00:00`);
+  const ms = d.getTime();
+  return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+}
+
+function taskSortByDuePriority(a, b) {
+  const dueDiff = taskDeadlineMs(a) - taskDeadlineMs(b);
+  if (dueDiff !== 0) return dueDiff;
+  const pDiff = taskPriorityRank(a.priority) - taskPriorityRank(b.priority);
+  if (pDiff !== 0) return pDiff;
+  return String(a.title || '').localeCompare(String(b.title || ''));
+}
+
+function isTaskInTodayBucket(task) {
+  if (!task || task.status === 'completed') return false;
+  if (!task.deadline) return false;
+  const due = new Date(`${task.deadline}T00:00:00`);
+  if (!Number.isFinite(due.getTime())) return false;
+  const today = startOfDay(new Date());
+  return due.getTime() <= today.getTime();
+}
+
+function renderTaskRow(task, goalMap, idx = 0) {
+  const priority = String(task.priority || 'medium').toLowerCase();
+  const status = task.status === 'completed' ? 'completed' : 'pending';
+  const dueText = task.deadline ? relDate(task.deadline) : 'NO DEADLINE';
+  const dueClass = dueText === 'OVERDUE' ? 'task-due-overdue' : dueText === 'DUE TODAY' ? 'task-due-today' : '';
+  const goalTitle = goalMap.get(task.goal_id);
+  const actionBtns = status === 'completed'
+    ? `<button class="task-action danger" onclick="deleteTaskItem(${task.id}, event)">Delete</button>`
+    : `
+      <button class="task-action" onclick="startTaskTimer(${task.id}, event)">Start Timer</button>
+      <button class="task-action" onclick="remindTask(${task.id}, event)">Remind</button>
+      <button class="task-action danger" onclick="deleteTaskItem(${task.id}, event)">Delete</button>
+    `;
+
+  return `<div class="pipeline-item ${status}" style="animation-delay:${idx * .02}s">
+    <button class="task-check ${status === 'completed' ? 'done' : ''}" onclick="toggleTask(${task.id},'${task.status}')">${status === 'completed' ? '✓' : ''}</button>
+    <div class="task-body">
+      <div class="task-name">${esc(task.title)}</div>
+      <div class="task-meta-row">
+        <span class="task-due ${dueClass}">${dueText}</span>
+        ${goalTitle ? `<span class="task-goal-chip">${esc(goalTitle)}</span>` : ''}
+      </div>
+    </div>
+    <div class="task-side">
+      <span class="task-priority tp-${priority}">${priority.toUpperCase()}</span>
+      <div class="task-row-actions">${actionBtns}</div>
+    </div>
+  </div>`;
+}
+
+function renderTaskSection(title, tasks, opts = {}) {
+  const { collapsible = false, collapsed = false, emptyLabel = '' } = opts;
+  const count = tasks.length;
+  const countText = `<span class="pipeline-count">${count}</span>`;
+  const toggleBtn = collapsible
+    ? `<button class="pipeline-collapse-btn" onclick="togglePipelineCompleted(event)">${collapsed ? 'Show' : 'Hide'}</button>`
+    : '';
+  const sectionBodyClass = `pipeline-section-body ${collapsed ? 'hidden' : ''}`;
+  const rows = count
+    ? tasks.map((task, idx) => renderTaskRow(task, opts.goalMap, idx)).join('')
+    : `<p class="pipeline-empty section-empty">${emptyLabel || 'No tasks here'}</p>`;
+
+  return `<section class="pipeline-section">
+    <header class="pipeline-section-head">
+      <h4>${title} ${countText}</h4>
+      ${toggleBtn}
+    </header>
+    <div class="${sectionBodyClass}">
+      ${rows}
+    </div>
+  </section>`;
+}
+
+function renderTaskPipeline(tasks, goals) {
+  const tl = document.getElementById('tasksList');
+  if (!tl) return;
+
+  const allTasks = Array.isArray(tasks) ? [...tasks] : [];
+  const goalMap = new Map((Array.isArray(goals) ? goals : []).map(g => [g.id, g.title]));
+
+  if (taskFilter === 'active') {
+    const pending = allTasks.filter(t => t.status !== 'completed');
+    const today = pending.filter(isTaskInTodayBucket).sort(taskSortByDuePriority);
+    const upcoming = pending.filter(t => !isTaskInTodayBucket(t)).sort(taskSortByDuePriority);
+
+    if (!pending.length) {
+      tl.innerHTML = '<p class="pipeline-empty">No active tasks in pipeline</p>';
+      return;
+    }
+
+    tl.innerHTML = [
+      renderTaskSection('Today', today, { goalMap, emptyLabel: 'Nothing due today' }),
+      renderTaskSection('Upcoming', upcoming, { goalMap, emptyLabel: 'No upcoming tasks' }),
+    ].join('');
+    return;
+  }
+
+  if (taskFilter === 'completed') {
+    const completed = allTasks.filter(t => t.status === 'completed').sort(taskSortByDuePriority);
+    const collapsed = isPipelineCompletedCollapsed();
+    tl.innerHTML = renderTaskSection('Completed', completed, {
+      goalMap,
+      collapsible: true,
+      collapsed,
+      emptyLabel: 'No completed tasks yet',
+    });
+    return;
+  }
+
+  const pending = allTasks.filter(t => t.status !== 'completed');
+  const today = pending.filter(isTaskInTodayBucket).sort(taskSortByDuePriority);
+  const upcoming = pending.filter(t => !isTaskInTodayBucket(t)).sort(taskSortByDuePriority);
+  const completed = allTasks.filter(t => t.status === 'completed').sort(taskSortByDuePriority);
+  const collapsed = isPipelineCompletedCollapsed();
+
+  if (!allTasks.length) {
+    tl.innerHTML = '<p class="pipeline-empty">No tasks in pipeline</p>';
+    return;
+  }
+
+  tl.innerHTML = [
+    renderTaskSection('Today', today, { goalMap, emptyLabel: 'Nothing due today' }),
+    renderTaskSection('Upcoming', upcoming, { goalMap, emptyLabel: 'No upcoming tasks' }),
+    renderTaskSection('Completed', completed, {
+      goalMap,
+      collapsible: true,
+      collapsed,
+      emptyLabel: 'No completed tasks yet',
+    }),
+  ].join('');
+}
+
+window.togglePipelineCompleted = (e) => {
+  if (e) e.stopPropagation();
+  const next = !isPipelineCompletedCollapsed();
+  setPipelineCompletedCollapsed(next);
+  renderTaskPipeline(latestTasksCache, latestGoalsCache);
+};
+
+window.startTaskTimer = (taskId, e) => {
+  if (e) e.stopPropagation();
+  const task = latestTasksCache.find(t => Number(t.id) === Number(taskId));
+  if (!task) return;
+  resetTimer();
+  startTimer();
+  const taskSelect = document.getElementById('activityTask');
+  if (taskSelect) {
+    const options = Array.from(taskSelect.options);
+    const existing = options.find(o => o.value === task.title);
+    if (!existing) {
+      const opt = document.createElement('option');
+      opt.value = task.title;
+      opt.textContent = task.title;
+      taskSelect.appendChild(opt);
+    }
+    taskSelect.value = task.title;
+  }
+  notify(`Started 25m timer for "${task.title}"`);
+};
+
+window.remindTask = async (taskId, e) => {
+  if (e) e.stopPropagation();
+  const task = latestTasksCache.find(t => Number(t.id) === Number(taskId));
+  if (!task) return;
+  const when = prompt(`When should I remind you for "${task.title}"? (example: in 30 minutes)`);
+  if (!when || !when.trim()) return;
+  const raw = when.trim();
+  const phrase = /^(in|after|at|on|today|tomorrow|next)\b/i.test(raw) ? raw : `in ${raw}`;
+  const message = `Remind me to ${task.title} ${phrase}`;
+  try {
+    await api('/chat', { method: 'POST', body: { message, session_id: currentSessionId } });
+    notify(`Reminder scheduled for "${task.title}"`);
+  } catch {
+    notify('Could not set reminder right now');
+  }
+};
+
+window.deleteTaskItem = async (taskId, e) => {
+  if (e) e.stopPropagation();
+  const task = latestTasksCache.find(t => Number(t.id) === Number(taskId));
+  if (!task) return;
+  if (!confirm(`Delete task "${task.title}"?`)) return;
+  await api(`/tasks/${task.id}`, { method: 'DELETE' });
+  notify('Task deleted');
+  loadTasksAndGoals();
+  loadSidebarStats();
+};
 
 window.toggleRoadmap = (id) => {
   const el = document.getElementById('roadmap-' + id);
@@ -903,10 +1588,12 @@ async function setupPushNotifications() {
 
 // ── Init ────────────────────────────────────────────
 async function init() {
+  applyHomeHistoryHidden(isHomeHistoryHidden());
   await loadSessions();
   if(!currentSessionId) {
     await loadChatHistory();
   }
+  resumeTaskCompletionChecks();
   loadRightPanel();
   setInterval(() => loadRightPanel(), 60000);
   updateTimerUI();
@@ -924,6 +1611,9 @@ async function init() {
 
   // Load Google widgets
   loadGoogleWidgets();
+
+  const savedTab = getSavedTab();
+  switchTab(savedTab);
 }
 
 function setCalendarDateBadge() {
@@ -942,7 +1632,8 @@ function sameDay(a, b) {
   return startOfDay(a).getTime() === startOfDay(b).getTime();
 }
 
-function formatTimeRange(start, end) {
+function formatTimeRange(start, end, allDay = false) {
+  if (allDay) return 'All day';
   const s = start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   if (!end) return s;
   const e = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1007,13 +1698,101 @@ function buildDemoCalendarEvents() {
   ];
 }
 
+function buildTaskGoalCalendarEvents(tasks = [], goals = []) {
+  const appEvents = [];
+  const activeGoals = (goals || []).filter(g => g.status !== 'completed');
+  const goalMap = new Map(activeGoals.map(g => [Number(g.id), g]));
+
+  (tasks || [])
+    .filter(t => t.status !== 'completed' && t.deadline)
+    .forEach((t) => {
+      const linkedGoal = goalMap.get(Number(t.goal_id));
+      appEvents.push({
+        title: `Task due: ${t.title}`,
+        startTime: t.deadline,
+        endTime: addDays(t.deadline, 1),
+        allDay: true,
+        source: 'task',
+        calendarName: linkedGoal ? linkedGoal.title : 'App Task',
+      });
+    });
+
+  activeGoals
+    .filter(g => g.deadline)
+    .forEach((g) => {
+      appEvents.push({
+        title: `Goal deadline: ${g.title}`,
+        startTime: g.deadline,
+        endTime: addDays(g.deadline, 1),
+        allDay: true,
+        source: 'goal',
+        calendarName: 'App Goal',
+      });
+    });
+
+  return appEvents;
+}
+
+function mergeCalendarEventSets(...lists) {
+  const out = [];
+  const seen = new Set();
+
+  lists
+    .filter(Array.isArray)
+    .flat()
+    .forEach((e) => {
+      const key = [
+        String(e.source || 'google').toLowerCase(),
+        String(e.title || '').trim().toLowerCase(),
+        String(e.startTime || ''),
+        String(e.endTime || ''),
+      ].join('|');
+
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(e);
+    });
+
+  return out;
+}
+
+async function getTaskGoalCalendarEvents() {
+  try {
+    const [tasks, goals] = await Promise.all([api('/tasks'), api('/goals')]);
+    return buildTaskGoalCalendarEvents(tasks, goals);
+  } catch {
+    return [];
+  }
+}
+
+function calendarSourceTag(event, isDemo = false) {
+  if (isDemo) return '<span class="calendar-demo-tag">DEMO</span>';
+  if (event.source === 'task') return '<span class="calendar-source-tag task">TASK</span>';
+  if (event.source === 'goal') return '<span class="calendar-source-tag goal">GOAL</span>';
+  return '';
+}
+
 function normalizeCalendarEvents(events = []) {
+  const parseCalendarStamp = (value, fallback, fallbackHour = 9) => {
+    if (!value) return fallback;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const [y, m, d] = value.split('-').map(Number);
+      return new Date(y, (m || 1) - 1, d || 1, fallbackHour, 0, 0, 0);
+    }
+    const dt = new Date(value);
+    return Number.isFinite(dt.getTime()) ? dt : fallback;
+  };
+
   return events.map((e, i) => {
     const fallback = new Date();
     fallback.setHours(9 + i, 0, 0, 0);
-    const start = e.startTime ? new Date(e.startTime) : fallback;
-    const end = e.endTime ? new Date(e.endTime) : new Date(start.getTime() + 60 * 60000);
-    return { title: e.title || 'Untitled Event', start, end };
+    const allDay = !!e.allDay;
+    const start = parseCalendarStamp(e.startTime, fallback, allDay ? 9 : 9);
+    const end = e.endTime
+      ? parseCalendarStamp(e.endTime, new Date(start.getTime() + 60 * 60000), allDay ? 17 : 10)
+      : new Date(start.getTime() + 60 * 60000);
+    const source = e.source || 'google';
+    return { title: e.title || 'Untitled Event', start, end, allDay, calendarName: e.calendarName || '', source };
   }).sort((a, b) => a.start - b.start);
 }
 
@@ -1028,13 +1807,12 @@ function renderCalendarDay(events = [], isDemo = false) {
     return;
   }
 
-  const demoTag = isDemo ? '<span class="calendar-demo-tag">DEMO</span>' : '';
   list.innerHTML = todays.map(e => `
-    <div class="calendar-day-item">
-      <div class="calendar-day-time">${formatTimeRange(e.start, e.end)}</div>
+    <div class="calendar-day-item source-${e.source || 'google'}">
+      <div class="calendar-day-time">${formatTimeRange(e.start, e.end, e.allDay)}</div>
       <div class="calendar-day-content">
-        <div class="calendar-day-title">${esc(e.title)} ${demoTag}</div>
-        <div class="calendar-day-meta">${e.start.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+        <div class="calendar-day-title">${esc(e.title)} ${calendarSourceTag(e, isDemo)}</div>
+        <div class="calendar-day-meta">${e.start.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}${e.calendarName ? ` | ${esc(e.calendarName)}` : ''}</div>
       </div>
     </div>
   `).join('');
@@ -1047,7 +1825,6 @@ function renderCalendarWeek(events = [], isDemo = false) {
   const start = new Date(today);
   start.setDate(today.getDate() - today.getDay());
   start.setHours(0, 0, 0, 0);
-  const demoTag = isDemo ? '<span class="calendar-demo-tag">DEMO</span>' : '';
 
   let html = '';
   for (let i = 0; i < 7; i++) {
@@ -1062,9 +1839,9 @@ function renderCalendarWeek(events = [], isDemo = false) {
         </div>
         <div class="calendar-week-list">
           ${dayEvents.length ? dayEvents.map(e => `
-            <div class="calendar-week-item">
-              <div class="calendar-week-time">${e.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
-              <div class="calendar-week-title">${esc(e.title)} ${demoTag}</div>
+            <div class="calendar-week-item source-${e.source || 'google'}">
+              <div class="calendar-week-time">${e.allDay ? 'ALL DAY' : e.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+              <div class="calendar-week-title">${esc(e.title)} ${calendarSourceTag(e, isDemo)}</div>
             </div>
           `).join('') : '<p class="calendar-week-empty">No events</p>'}
         </div>
@@ -1086,7 +1863,6 @@ function renderCalendarMonth(events = [], isDemo = false) {
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const startWeekDay = firstDay.getDay();
   const dayNames = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
-  const demoTag = isDemo ? '<span class="calendar-demo-tag">DEMO</span>' : '';
 
   head.innerHTML = dayNames.map(d => `<span>${d}</span>`).join('');
 
@@ -1099,7 +1875,7 @@ function renderCalendarMonth(events = [], isDemo = false) {
       <div class="calendar-month-cell ${sameDay(cellDate, new Date()) ? 'is-today' : ''}">
         <div class="calendar-month-date">${dayNum}</div>
         <div class="calendar-month-events">
-          ${cellEvents.slice(0, 2).map(e => `<div class="calendar-month-event">${esc(e.title)} ${demoTag}</div>`).join('')}
+          ${cellEvents.slice(0, 2).map(e => `<div class="calendar-month-event source-${e.source || 'google'}">${esc(e.title)} ${calendarSourceTag(e, isDemo)}</div>`).join('')}
           ${cellEvents.length > 2 ? `<div class="calendar-month-more">+${cellEvents.length - 2} more</div>` : ''}
         </div>
       </div>
@@ -1129,7 +1905,7 @@ function renderCalendarMetrics(events = []) {
   if (focusEl) focusEl.textContent = String(focusCount);
 }
 
-function renderCalendarViews(events = [], isDemo = false) {
+function renderCalendarViews(events = [], isDemo = false, mode = 'google') {
   calendarEventsCache = normalizeCalendarEvents(events);
   calendarIsDemo = isDemo;
   renderCalendarDay(calendarEventsCache, calendarIsDemo);
@@ -1139,9 +1915,15 @@ function renderCalendarViews(events = [], isDemo = false) {
 
   const hint = document.getElementById('calendarDataHint');
   if (hint) {
-    hint.textContent = isDemo
-      ? 'Showing demo events for UI preview. Connect Google for live data.'
-      : 'Live Google Calendar data connected.';
+    if (isDemo) {
+      hint.textContent = 'Showing demo events for UI preview. Connect Google for live data.';
+    } else if (mode === 'app') {
+      hint.textContent = 'Showing app task and goal deadlines. Connect Google to push them to your Google Calendar app.';
+    } else if (mode === 'google_app') {
+      hint.textContent = 'Showing Google Calendar events plus app task and goal deadlines. Use "Sync Today Plan" to write app tasks/goals into Google Calendar.';
+    } else {
+      hint.textContent = 'Live Google Calendar data connected.';
+    }
   }
 
   updateCalendarRangeLabel();
@@ -1151,9 +1933,19 @@ function renderCalendarViews(events = [], isDemo = false) {
 async function loadGoogleWidgets() {
   try {
     const status = await api('/google/status');
+    const appEvents = await getTaskGoalCalendarEvents();
     const btn = document.getElementById('googleConnectBtn');
     const btnText = document.getElementById('googleConnectText');
+    const syncBtn = document.getElementById('calendarSyncBtn');
+    const syncText = document.getElementById('calendarSyncText');
     if (!btn || !btnText) return;
+
+    const setSyncButton = (enabled, label, onClick) => {
+      if (!syncBtn || !syncText) return;
+      syncBtn.disabled = !enabled;
+      syncText.textContent = label;
+      syncBtn.onclick = enabled ? onClick : null;
+    };
 
     if (status.connected) {
       btn.classList.add('connected');
@@ -1165,18 +1957,51 @@ async function loadGoogleWidgets() {
         }
       };
 
+      setSyncButton(true, 'Sync Today Plan', async () => {
+        if (!syncBtn || !syncText) return;
+        const prev = syncText.textContent;
+        syncBtn.disabled = true;
+        syncText.textContent = 'Syncing...';
+        try {
+          const result = await api('/google/calendar/sync-today', { method: 'POST' });
+          if (result?.error) throw new Error(result.error);
+          notify(`Synced ${result.created || 0} item(s) to Google Calendar${result.skipped ? ` (${result.skipped} already existed)` : ''}.`);
+          await loadGoogleWidgets();
+        } catch (err) {
+          notify(`Sync failed: ${err.message || err}`);
+          syncBtn.disabled = false;
+          syncText.textContent = prev || 'Sync Today Plan';
+        }
+      });
+
       // Load Calendar
       try {
-        const events = await api('/google/calendar/today');
-        renderCalendarViews(events, false);
+        const eventsResp = await api('/google/calendar/today');
+        if (Array.isArray(eventsResp)) {
+          lastCalendarError = '';
+          const merged = mergeCalendarEventSets(eventsResp, appEvents);
+          renderCalendarViews(merged, false, appEvents.length ? 'google_app' : 'google');
+        } else {
+          const rawMsg = String(eventsResp?.error || 'Could not load Google Calendar events.');
+          const userMsg = /disabled|enable.*calendar api|cloud project/i.test(rawMsg)
+            ? 'Google Calendar API is disabled in Google Cloud. Enable it, wait 2-5 minutes, then reconnect Google.'
+            : `Calendar sync error: ${rawMsg}`;
+          notifyCalendarErrorOnce(userMsg);
+          if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
+          else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
+        }
       } catch {
-        renderCalendarViews([], false);
+        notifyCalendarErrorOnce('Calendar network error. Please check connection and try again.');
+        if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
+        else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
       }
     } else if (status.hasCredentials) {
       // Credentials saved but not yet authorized
       btn.classList.remove('connected');
       btnText.textContent = 'Authorize Google';
-      renderCalendarViews(buildDemoCalendarEvents(), true);
+      setSyncButton(false, 'Authorize First');
+      if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
+      else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
       btn.onclick = async () => {
         try {
           const data = await api('/google/auth-url');
@@ -1189,7 +2014,9 @@ async function loadGoogleWidgets() {
       // No credentials at all - prompt user to enter them
       btn.classList.remove('connected');
       btnText.textContent = 'Connect Google';
-      renderCalendarViews(buildDemoCalendarEvents(), true);
+      setSyncButton(false, 'Connect Google');
+      if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
+      else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
       btn.onclick = () => {
         const clientId = prompt('Enter your Google OAuth Client ID:\n\n(Get it from Google Cloud Console → Credentials)');
         if (!clientId) return;
@@ -1215,6 +2042,7 @@ async function loadGoogleWidgets() {
 }
 
 init();
+
 
 
 

@@ -67,6 +67,15 @@ db.exec(`
     sent_at TEXT DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS user_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mem_key TEXT UNIQUE NOT NULL,
+    mem_value TEXT NOT NULL,
+    importance REAL DEFAULT 0.5,
+    source TEXT DEFAULT 'chat',
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -146,7 +155,7 @@ const deleteTask = db.prepare(`DELETE FROM tasks WHERE id = ?`);
 // ── Events ──────────────────────────────────────────────
 const addEvent = db.prepare(`INSERT INTO events (title, date, importance) VALUES (?, ?, ?)`);
 const getEvents = db.prepare(`SELECT * FROM events ORDER BY date ASC`);
-const getUpcomingEvents = db.prepare(`SELECT * FROM events WHERE date >= datetime('now') ORDER BY date ASC`);
+const getUpcomingEvents = db.prepare(`SELECT * FROM events WHERE date(date) >= date('now') ORDER BY date ASC`);
 
 // ── Activity Logs ───────────────────────────────────────
 const logActivity = db.prepare(`INSERT INTO activity_logs (action, task, duration_min, timestamp) VALUES (?, ?, ?, ?)`);
@@ -164,6 +173,24 @@ const getRecentProactive = db.prepare(`SELECT * FROM proactive_messages ORDER BY
 const getUnreadProactive = db.prepare(`SELECT * FROM proactive_messages WHERE read = 0 ORDER BY sent_at DESC`);
 const markProactiveRead = db.prepare(`UPDATE proactive_messages SET read = 1 WHERE id = ?`);
 const getProactiveCountToday = db.prepare(`SELECT COUNT(*) as count FROM proactive_messages WHERE date(sent_at) = date('now')`);
+const getLastProactive = db.prepare(`SELECT * FROM proactive_messages ORDER BY sent_at DESC LIMIT 1`);
+
+// â”€â”€ User Memory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const upsertUserMemory = db.prepare(`
+  INSERT INTO user_memory (mem_key, mem_value, importance, source, updated_at)
+  VALUES (?, ?, ?, ?, datetime('now'))
+  ON CONFLICT(mem_key) DO UPDATE SET
+    mem_value = excluded.mem_value,
+    importance = CASE
+      WHEN excluded.importance > user_memory.importance THEN excluded.importance
+      ELSE user_memory.importance
+    END,
+    source = excluded.source,
+    updated_at = datetime('now')
+`);
+const getUserMemories = db.prepare(`SELECT * FROM user_memory ORDER BY importance DESC, updated_at DESC LIMIT ?`);
+const getUserMemoryByKey = db.prepare(`SELECT * FROM user_memory WHERE mem_key = ?`);
+const deleteUserMemoryByKey = db.prepare(`DELETE FROM user_memory WHERE mem_key = ?`);
 
 // ── Chat Sessions ───────────────────────────────────────
 const createChatSession = db.prepare(`INSERT INTO chat_sessions (id, title) VALUES (?, ?)`);
@@ -193,6 +220,7 @@ const removePushSubscriptionByEndpoint = db.prepare(`DELETE FROM push_subscripti
 // ── Reminders ───────────────────────────────────────────
 const addReminder = db.prepare(`INSERT INTO reminders (title, time_rule, is_recurring) VALUES (?, ?, ?)`);
 const getActiveReminders = db.prepare(`SELECT * FROM reminders WHERE is_active = 1`);
+const getReminderById = db.prepare(`SELECT * FROM reminders WHERE id = ?`);
 const deactivateReminder = db.prepare(`UPDATE reminders SET is_active = 0 WHERE id = ?`);
 const deleteReminder = db.prepare(`DELETE FROM reminders WHERE id = ?`);
 
@@ -240,6 +268,14 @@ module.exports = {
   getUnreadProactive: () => getUnreadProactive.all(),
   markProactiveRead: (id) => markProactiveRead.run(id),
   getProactiveCountToday: () => getProactiveCountToday.get().count,
+  getLastProactive: () => getLastProactive.get(),
+
+  // User Memory
+  upsertUserMemory: (key, value, importance = 0.5, source = 'chat') =>
+    upsertUserMemory.run(key, value, importance, source),
+  getUserMemories: (limit = 50) => getUserMemories.all(limit),
+  getUserMemoryByKey: (key) => getUserMemoryByKey.get(key),
+  deleteUserMemoryByKey: (key) => deleteUserMemoryByKey.run(key),
 
   // Chat Sessions
   createChatSession: (id, title = 'New Chat') => createChatSession.run(id, title),
@@ -274,6 +310,7 @@ module.exports = {
   // Reminders
   addReminder: (title, timeRule, isRecurring = 0) => addReminder.run(title, timeRule, isRecurring),
   getActiveReminders: () => getActiveReminders.all(),
+  getReminderById: (id) => getReminderById.get(id),
   deactivateReminder: (id) => deactivateReminder.run(id),
   deleteReminder: (id) => deleteReminder.run(id),
 };

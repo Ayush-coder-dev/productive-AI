@@ -27,7 +27,7 @@ router.post('/chat', async (req, res) => {
         db.addChatMessage(session_id, 'user', message);
 
         // Extract structured data from message in background
-        extractAndStore(message).catch(err => console.warn('Extraction error:', err.message));
+        extractAndStore(message, session_id).catch(err => console.warn('Extraction error:', err.message));
 
         // Log a chat activity
         db.logActivity('chat', null, 1);
@@ -229,6 +229,16 @@ router.get('/context', (req, res) => {
     res.json(contextGraph.buildContextGraph());
 });
 
+router.get('/memory', (req, res) => {
+    const limit = parseInt(req.query.limit) || 50;
+    res.json(db.getUserMemories(limit));
+});
+
+router.delete('/memory/:key', (req, res) => {
+    db.deleteUserMemoryByKey(req.params.key);
+    res.json({ message: 'Memory deleted' });
+});
+
 // ── Trigger (manual) ────────────────────────────────────
 router.post('/trigger', async (req, res) => {
     try {
@@ -240,7 +250,7 @@ router.post('/trigger', async (req, res) => {
 });
 
 // ── Helper: extract data from chat and store ────────────
-async function extractAndStore(message) {
+async function extractAndStore(message, sessionId = null) {
     const extracted = await llm.extractFromMessage(message);
     let reminderConfigChanged = false;
     const relativeReminderTime = parseRelativeReminderTime(message);
@@ -336,6 +346,64 @@ async function extractAndStore(message) {
         // Tell the scheduler to pick up reminder changes immediately.
         const { reloadCrons } = require('./scheduler');
         reloadCrons();
+    }
+
+    try {
+        await extractAndStoreMemories(message, sessionId);
+    } catch (err) {
+        console.warn('Memory extraction error:', err.message);
+    }
+}
+
+function normalizeMemoryKey(rawKey) {
+    const key = String(rawKey || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+
+    if (!key) return '';
+    return key.slice(0, 64);
+}
+
+function clampImportance(rawImportance) {
+    const n = Number(rawImportance);
+    if (!Number.isFinite(n)) return 0.5;
+    return Math.max(0, Math.min(1, n));
+}
+
+async function extractAndStoreMemories(message, sessionId = null) {
+    if (!message || String(message).trim().split(/\s+/).length < 4) return;
+
+    let recentChat = '';
+    try {
+        let selectedSessionId = sessionId;
+        if (!selectedSessionId) {
+            const sessions = db.getChatSessions();
+            if (sessions.length > 0) selectedSessionId = sessions[0].id;
+        }
+
+        if (selectedSessionId) {
+            recentChat = db.getRecentChat(selectedSessionId, 8)
+                .reverse()
+                .map(m => `${m.role}: ${m.content}`)
+                .join('\n');
+        }
+    } catch {
+        recentChat = '';
+    }
+
+    const contextSummary = contextGraph.getContextSummary();
+    const memoryResult = await llm.extractUserMemories(message, recentChat, contextSummary);
+    if (!memoryResult || !Array.isArray(memoryResult.memories)) return;
+
+    for (const memory of memoryResult.memories) {
+        const key = normalizeMemoryKey(memory.key);
+        const value = String(memory.value || '').trim();
+        if (!key || !value) continue;
+
+        const importance = clampImportance(memory.importance);
+        db.upsertUserMemory(key, value.slice(0, 500), importance, 'chat');
     }
 }
 
@@ -447,69 +515,7 @@ router.post('/push/unsubscribe', (req, res) => {
     }
 });
 
-// ── Google Integrations ─────────────────────────────────
-const googleAuth = require('./googleAuth');
-const googleCalendar = require('./googleCalendar');
 const { dailyBriefing } = require('./scheduler');
-
-router.get('/google/status', (req, res) => {
-    res.json({ connected: googleAuth.isConnected(), hasCredentials: googleAuth.hasCredentials() });
-});
-
-router.post('/google/save-credentials', (req, res) => {
-    const { client_id, client_secret } = req.body;
-    if (!client_id || !client_secret) return res.status(400).json({ error: 'Both client_id and client_secret are required' });
-    googleAuth.saveCredentials(client_id, client_secret);
-    res.json({ success: true });
-});
-
-router.get('/google/auth-url', (req, res) => {
-    if (!googleAuth.hasCredentials()) {
-        return res.status(400).json({ error: 'Google credentials not configured. Use the Connect Google button to set them up.' });
-    }
-    const url = googleAuth.getAuthUrl();
-    if (!url) return res.status(500).json({ error: 'Failed to generate auth URL' });
-    res.json({ url });
-});
-
-router.get('/google/callback', async (req, res) => {
-    try {
-        const { code } = req.query;
-        if (!code) return res.status(400).send('Missing authorization code');
-        await googleAuth.handleCallback(code);
-        res.send('<html><body style="background:#0B0B0F;color:#F0F0F5;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><div style="text-align:center"><h1 style="color:#2DD4A0">✓ Google Connected!</h1><p>You can close this tab and return to Augment AI.</p></div></body></html>');
-    } catch (err) {
-        res.status(500).send('OAuth error: ' + err.message);
-    }
-});
-
-router.get('/google/disconnect', (req, res) => {
-    googleAuth.disconnect();
-    res.json({ success: true });
-});
-
-router.get('/google/calendar/today', async (req, res) => {
-    try {
-        const events = await googleCalendar.getCalendarWindowEvents();
-        res.json(events);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-router.post('/google/calendar/sync-today', async (req, res) => {
-    try {
-        if (!googleAuth.isConnected()) {
-            return res.status(400).json({ error: 'Google is not connected' });
-        }
-        const tasks = db.getTasks();
-        const goals = db.getGoals();
-        const result = await googleCalendar.syncTodayPlanToCalendar(tasks, goals);
-        res.json({ success: true, ...result });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
 
 // Test endpoint to manually trigger a daily briefing
 router.post('/briefing/trigger', async (req, res) => {
@@ -521,4 +527,5 @@ router.post('/briefing/trigger', async (req, res) => {
     }
 });
 
+router.extractAndStore = extractAndStore;
 module.exports = router;

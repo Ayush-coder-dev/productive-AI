@@ -85,7 +85,7 @@ document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', (
 function getSavedTab() {
   try {
     const saved = localStorage.getItem(TAB_STORAGE_KEY);
-    const allowed = ['home', 'strategy', 'velocity', 'rituals', 'calendar'];
+    const allowed = ['home', 'strategy', 'velocity', 'rituals'];
     return allowed.includes(saved) ? saved : 'home';
   } catch {
     return 'home';
@@ -136,17 +136,12 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === `tab-${tab}`));
 
   // Update topbar context
-  const labels = { home: 'PRODUCTIVITY COACHING', strategy: 'STRATEGIC EXECUTION', velocity: 'THE PULSE', rituals: 'SUBCONSCIOUS ARCHITECTURE', calendar: 'SCHEDULE INTELLIGENCE' };
+  const labels = { home: 'PRODUCTIVITY COACHING', strategy: 'STRATEGIC EXECUTION', velocity: 'THE PULSE', rituals: 'SUBCONSCIOUS ARCHITECTURE' };
   document.getElementById('topbarContext').textContent = labels[tab] || '';
 
   if (tab === 'strategy') loadTasksAndGoals();
   if (tab === 'velocity') loadAnalytics();
   if (tab === 'rituals') loadHabits();
-  if (tab === 'calendar') {
-    setCalendarDateBadge();
-    setCalendarView(calendarView);
-    loadGoogleWidgets();
-  }
 }
 
 document.querySelectorAll('#calendarViewToggle .seg').forEach(b => {
@@ -1532,8 +1527,8 @@ async function loadSidebarStats() {
 
 // ── Keyboard Shortcuts ──────────────────────────────
 document.addEventListener('keydown', e => {
-  const tabs = ['home', 'strategy', 'velocity', 'rituals', 'calendar'];
-  if (e.ctrlKey && e.key >= '1' && e.key <= '5') { e.preventDefault(); switchTab(tabs[+e.key - 1]); }
+  const tabs = ['home', 'strategy', 'velocity', 'rituals'];
+  if (e.ctrlKey && e.key >= '1' && e.key <= '4') { e.preventDefault(); switchTab(tabs[+e.key - 1]); }
   if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); switchTab('home'); chatInput.focus(); }
   if (e.ctrlKey && e.key === 't') { e.preventDefault(); switchTab('strategy'); timerRunning ? pauseTimer() : startTimer(); }
 });
@@ -1606,11 +1601,6 @@ async function init() {
 
   // Setup push notifications
   setupPushNotifications();
-
-  setCalendarDateBadge();
-
-  // Load Google widgets
-  loadGoogleWidgets();
 
   const savedTab = getSavedTab();
   switchTab(savedTab);
@@ -1930,117 +1920,6 @@ function renderCalendarViews(events = [], isDemo = false, mode = 'google') {
 }
 
 // ── Google Integration Widgets ──────────────────────
-async function loadGoogleWidgets() {
-  try {
-    const status = await api('/google/status');
-    const appEvents = await getTaskGoalCalendarEvents();
-    const btn = document.getElementById('googleConnectBtn');
-    const btnText = document.getElementById('googleConnectText');
-    const syncBtn = document.getElementById('calendarSyncBtn');
-    const syncText = document.getElementById('calendarSyncText');
-    if (!btn || !btnText) return;
-
-    const setSyncButton = (enabled, label, onClick) => {
-      if (!syncBtn || !syncText) return;
-      syncBtn.disabled = !enabled;
-      syncText.textContent = label;
-      syncBtn.onclick = enabled ? onClick : null;
-    };
-
-    if (status.connected) {
-      btn.classList.add('connected');
-      btnText.textContent = 'Google Connected';
-      btn.onclick = async () => {
-        if (confirm('Disconnect Google account?')) {
-          await api('/google/disconnect');
-          location.reload();
-        }
-      };
-
-      setSyncButton(true, 'Sync Today Plan', async () => {
-        if (!syncBtn || !syncText) return;
-        const prev = syncText.textContent;
-        syncBtn.disabled = true;
-        syncText.textContent = 'Syncing...';
-        try {
-          const result = await api('/google/calendar/sync-today', { method: 'POST' });
-          if (result?.error) throw new Error(result.error);
-          notify(`Synced ${result.created || 0} item(s) to Google Calendar${result.skipped ? ` (${result.skipped} already existed)` : ''}.`);
-          await loadGoogleWidgets();
-        } catch (err) {
-          notify(`Sync failed: ${err.message || err}`);
-          syncBtn.disabled = false;
-          syncText.textContent = prev || 'Sync Today Plan';
-        }
-      });
-
-      // Load Calendar
-      try {
-        const eventsResp = await api('/google/calendar/today');
-        if (Array.isArray(eventsResp)) {
-          lastCalendarError = '';
-          const merged = mergeCalendarEventSets(eventsResp, appEvents);
-          renderCalendarViews(merged, false, appEvents.length ? 'google_app' : 'google');
-        } else {
-          const rawMsg = String(eventsResp?.error || 'Could not load Google Calendar events.');
-          const userMsg = /disabled|enable.*calendar api|cloud project/i.test(rawMsg)
-            ? 'Google Calendar API is disabled in Google Cloud. Enable it, wait 2-5 minutes, then reconnect Google.'
-            : `Calendar sync error: ${rawMsg}`;
-          notifyCalendarErrorOnce(userMsg);
-          if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
-          else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
-        }
-      } catch {
-        notifyCalendarErrorOnce('Calendar network error. Please check connection and try again.');
-        if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
-        else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
-      }
-    } else if (status.hasCredentials) {
-      // Credentials saved but not yet authorized
-      btn.classList.remove('connected');
-      btnText.textContent = 'Authorize Google';
-      setSyncButton(false, 'Authorize First');
-      if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
-      else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
-      btn.onclick = async () => {
-        try {
-          const data = await api('/google/auth-url');
-          window.open(data.url, '_blank');
-        } catch (err) {
-          notify('Error: ' + err.message);
-        }
-      };
-    } else {
-      // No credentials at all - prompt user to enter them
-      btn.classList.remove('connected');
-      btnText.textContent = 'Connect Google';
-      setSyncButton(false, 'Connect Google');
-      if (appEvents.length) renderCalendarViews(appEvents, false, 'app');
-      else renderCalendarViews(buildDemoCalendarEvents(), true, 'demo');
-      btn.onclick = () => {
-        const clientId = prompt('Enter your Google OAuth Client ID:\n\n(Get it from Google Cloud Console → Credentials)');
-        if (!clientId) return;
-        const clientSecret = prompt('Enter your Google OAuth Client Secret:');
-        if (!clientSecret) return;
-
-        api('/google/save-credentials', {
-          method: 'POST',
-          body: { client_id: clientId.trim(), client_secret: clientSecret.trim() }
-        }).then(() => {
-          notify('✓ Credentials saved! Now authorizing...');
-          return api('/google/auth-url');
-        }).then(data => {
-          window.open(data.url, '_blank');
-        }).catch(err => {
-          notify('Error: ' + err.message);
-        });
-      };
-    }
-  } catch (err) {
-    console.error('[Google] Widget load error:', err);
-  }
-}
-
 init();
 
 

@@ -23,6 +23,10 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
     console.log(`\n AI Productivity Coach running at http://localhost:${PORT}\n`);
 
+    // Start Telegram bot (if configured in .env)
+    const { startBot } = require('./src/telegram');
+    startBot();
+
     // Start the proactive scheduler
     const { startScheduler } = require('./src/scheduler');
     startScheduler();

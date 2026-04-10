@@ -53,10 +53,6 @@
             <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path d="M5 2a1 1 0 011 1v1h1a1 1 0 010 2H6v1a1 1 0 01-2 0V6H3a1 1 0 010-2h1V3a1 1 0 011-1zm0 10a1 1 0 011 1v1h1a1 1 0 110 2H6v1a1 1 0 11-2 0v-1H3a1 1 0 110-2h1v-1a1 1 0 011-1zM12 2a1 1 0 01.967.744L14.146 7.2 17.5 9.134a1 1 0 010 1.732l-3.354 1.935-1.18 4.455a1 1 0 01-1.933 0L9.854 12.8 6.5 10.866a1 1 0 010-1.732l3.354-1.935 1.18-4.455A1 1 0 0112 2z"/></svg>
             Habits
           </button>
-          <button class="nav-btn" data-tab="calendar">
-            <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M6 2a1 1 0 011 1v1h6V3a1 1 0 112 0v1h1a2 2 0 012 2v1H2V6a2 2 0 012-2h1V3a1 1 0 011-1zm12 7H2v7a2 2 0 002 2h12a2 2 0 002-2V9z" clip-rule="evenodd"/></svg>
-            Calendar
-          </button>
         </nav>
 
         <!-- Sidebar Widgets -->
@@ -442,71 +438,6 @@
       </section>
 
       <!-- â•â•â• CALENDAR TAB â•â•â• -->
-      <section class="tab-content" id="tab-calendar">
-        <div class="calendar-page">
-          <div class="calendar-header">
-            <div>
-              <span class="section-eyebrow">TIME SYSTEM</span>
-              <h1 class="page-title-serif">Calendar</h1>
-              <p class="calendar-sub">Day, week, and month views in your existing Augment style.</p>
-            </div>
-            <div class="calendar-header-actions">
-              <button class="google-connect-btn calendar-connect-btn calendar-sync-btn" id="calendarSyncBtn" title="Send today's pending tasks and goal deadlines to Google Calendar">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
-                <span id="calendarSyncText">Sync Today Plan</span>
-              </button>
-              <button class="google-connect-btn calendar-connect-btn" id="googleConnectBtn">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
-                <span id="googleConnectText">Connect Google</span>
-              </button>
-            </div>
-          </div>
-
-          <div class="calendar-toolbar">
-            <div class="seg-ctrl" id="calendarViewToggle">
-              <button class="seg active" data-view="day">DAY</button>
-              <button class="seg" data-view="week">WEEK</button>
-              <button class="seg" data-view="month">MONTH</button>
-            </div>
-            <span class="calendar-range" id="calendarRangeLabel"></span>
-          </div>
-
-          <div class="calendar-grid">
-            <div class="calendar-panel calendar-main-panel">
-              <div class="sub-header calendar-subhead">
-                <h3 id="calendarViewTitle">Today's Timeline</h3>
-                <span class="calendar-date" id="calendarDateBadge"></span>
-              </div>
-
-              <div class="calendar-view active" id="calendarViewDay">
-                <div id="calendarDayList" class="calendar-day-list">
-                  <p class="empty-hint" id="calendarPlaceholder">Connect Google to view events</p>
-                </div>
-              </div>
-
-              <div class="calendar-view hidden" id="calendarViewWeek">
-                <div id="calendarWeekGrid" class="calendar-week-grid"></div>
-              </div>
-
-              <div class="calendar-view hidden" id="calendarViewMonth">
-                <div class="calendar-month-head" id="calendarMonthHead"></div>
-                <div id="calendarMonthGrid" class="calendar-month-grid"></div>
-              </div>
-            </div>
-
-            <div class="calendar-panel">
-              <h3 class="panel-title">Calendar Signals</h3>
-              <div class="calendar-metrics">
-                <div class="calendar-metric"><span>Events Today</span><strong id="calendarMetricToday">0</strong></div>
-                <div class="calendar-metric"><span>Total This Week</span><strong id="calendarMetricWeek">0</strong></div>
-                <div class="calendar-metric"><span>Focused Blocks</span><strong id="calendarMetricFocus">0</strong></div>
-              </div>
-              <p class="calendar-hint">Use Day for execution, Week for distribution, and Month for strategic visibility.</p>
-              <p class="calendar-hint" id="calendarDataHint">Connect Google to replace demo entries with live events.</p>
-            </div>
-          </div>
-        </div>
-      </section>
     </main>
   </div>
 
